@@ -6,12 +6,6 @@ import { App } from "@microsoft/teams.apps";
 import { ConsoleLogger } from "@microsoft/teams.common";
 import { DevtoolsPlugin } from "@microsoft/teams.dev";
 import { ManagerPrompt } from "./agent/manager";
-import {
-  FILE_UPLOAD_HELP,
-  ingestExcelAttachmentsFromActivity,
-  looksLikeUndeliveredFileShare,
-} from "./events/chatExcelAttachment";
-import { getEventsSource, resolveUploadedWorkbook } from "./events/excelStore";
 import { IDatabase } from "./storage/database";
 import { StorageFactory } from "./storage/storageFactory";
 import { logModelConfigs, validateEnvironment } from "./utils/config";
@@ -49,7 +43,8 @@ const options =
 const app = new App({
   ...options,
   logger,
-  skipAuth: !process.env.CLIENT_ID,
+  // JWT check fetches login.botframework.com. If that host is blocked, set SKIP_BOT_AUTH=1 locally.
+  skipAuth: !process.env.CLIENT_ID || process.env.SKIP_BOT_AUTH === "1",
 });
 
 // Initialize storage
@@ -83,6 +78,17 @@ app.on("message.submit.feedback", async ({ activity }) => {
   }
 });
 
+function describeNetworkError(error: unknown): string {
+  const err = error as { message?: string; code?: string; cause?: { message?: string; code?: string } };
+  const parts = [err?.message, err?.code, err?.cause?.message, err?.cause?.code].filter(Boolean);
+  return parts.join(" | ") || String(error);
+}
+
+function isOutboundBlocked(error: unknown): boolean {
+  const text = describeNetworkError(error);
+  return /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|certificate|unable to verify/i.test(text);
+}
+
 app.on("message", async ({ send, activity, api }) => {
   const botMentioned = activity.entities?.some((e) => e.type === "mention");
   const context = botMentioned
@@ -92,108 +98,32 @@ app.on("message", async ({ send, activity, api }) => {
   let trackedMessages;
 
   if (!activity.conversation.isGroup || botMentioned) {
-    // process request if One-on-One chat or if @mentioned in Groupchat
-    await send({ type: "typing" });
-
-    let uploadNote: string | undefined;
     try {
-      const ingested = await ingestExcelAttachmentsFromActivity(
-        activity,
-        context.conversationId,
-        logger.child("excel-upload"),
-        context.userId
-      );
-      if (ingested) {
-        uploadNote = ingested.confirmation;
-        logger.debug(`✅ Loaded chat Excel: ${ingested.files.map((f) => f.fileName).join(", ")}`);
-      }
+      await send({ type: "typing" });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      logger.error(`❌ Chat Excel ingest failed: ${message}`);
-      const formattedFailure = finalizePromptResponse(
-        `I couldn't read the attached Excel file.\n${message}`,
-        context,
-        logger
-      );
-      const sent = await send(formattedFailure);
-      formattedFailure.id = sent.id;
-      trackedMessages = createMessageRecords([activity, formattedFailure]);
-      await context.memory.addMessages(trackedMessages);
-      return;
+      logger.warn(`Typing indicator failed (continuing): ${describeNetworkError(error)}`);
     }
 
-    const strippedText = (activity.text || "").replace(/<at>[^<]*<\/at>/gi, "").trim();
-    const hasQuestion = Boolean(strippedText);
-    const looksLikeGreetingOnly =
-      hasQuestion && /^(hi|hello|hey|yo|thanks|thank you|ok|okay|hola)[\s!.?]*$/i.test(strippedText);
+    try {
+      const manager = new ManagerPrompt(context, logger.child("manager"));
+      const result = await manager.processRequest();
+      const formattedResult = finalizePromptResponse(result.response, context, logger);
 
-    // After a successful upload, confirm the real filename. Don't let the model invent names.
-    if (uploadNote && (!hasQuestion || looksLikeGreetingOnly)) {
-      const formattedUpload = finalizePromptResponse(uploadNote, context, logger);
-      const sent = await send(formattedUpload);
-      formattedUpload.id = sent.id;
-      trackedMessages = createMessageRecords([activity, formattedUpload]);
-      await context.memory.addMessages(trackedMessages);
-      return;
+      const sent = await send(formattedResult);
+      formattedResult.id = sent.id;
+      trackedMessages = createMessageRecords([activity, formattedResult]);
+    } catch (error) {
+      const detail = describeNetworkError(error);
+      logger.error(`❌ Failed to handle/reply to message: ${detail}`);
+      if (isOutboundBlocked(error)) {
+        logger.error(
+          "Outbound HTTPS to Microsoft is blocked (VPN/proxy/firewall). " +
+            "The bot received the Teams message but cannot call login.botframework.com or smba.trafficmanager.net:443. " +
+            "Connect the corporate VPN, or set HTTPS_PROXY in .env if you use a proxy."
+        );
+      }
+      trackedMessages = createMessageRecords([activity]);
     }
-
-    const activeWorkbook = resolveUploadedWorkbook(context.conversationId, context.userId);
-
-    // Teams showed a file card, but no downloadable Excel arrived for the bot.
-    if (!uploadNote && looksLikeUndeliveredFileShare(activity)) {
-      logger.warn(
-        `⚠️ File share visible in Teams UI but no Excel bytes delivered. ${JSON.stringify(activity.attachments || [])}`
-      );
-      const formatted = finalizePromptResponse(
-        `I can see you shared a file in Teams, but I still could not read the Excel bytes.\n\n${FILE_UPLOAD_HELP}`,
-        context,
-        logger
-      );
-      const sent = await send(formatted);
-      formatted.id = sent.id;
-      trackedMessages = createMessageRecords([activity, formatted]);
-      await context.memory.addMessages(trackedMessages);
-      return;
-    }
-
-    // Chat mode with no loaded workbook: never let the LLM invent 202611_* from history.
-    if (getEventsSource() === "chat" && !activeWorkbook && !uploadNote) {
-      const formatted = finalizePromptResponse(
-        looksLikeGreetingOnly || !hasQuestion
-          ? `Hi! I don't have an Excel workbook loaded yet.\n\n${FILE_UPLOAD_HELP}`
-          : `I don't have an Excel workbook loaded, so I can't answer from a file yet.\n\n${FILE_UPLOAD_HELP}`,
-        context,
-        logger
-      );
-      const sent = await send(formatted);
-      formatted.id = sent.id;
-      trackedMessages = createMessageRecords([activity, formatted]);
-      await context.memory.addMessages(trackedMessages);
-      return;
-    }
-
-    // Tell the model which file is actually loaded (prevents stale 202611 replies from chat history).
-    if (activeWorkbook?.fileName) {
-      context.text =
-        `[Active workbook: ${activeWorkbook.fileName} (source=${activeWorkbook.sourceType})]\n` +
-        context.text;
-    }
-
-    const manager = new ManagerPrompt(context, logger.child("manager"));
-    const result = await manager.processRequest();
-    let formattedResult = finalizePromptResponse(result.response, context, logger);
-    if (uploadNote) {
-      formattedResult = finalizePromptResponse(
-        `${uploadNote}\n\n${result.response || ""}`.trim(),
-        context,
-        logger
-      );
-    }
-
-    const sent = await send(formattedResult);
-    formattedResult.id = sent.id;
-
-    trackedMessages = createMessageRecords([activity, formattedResult]);
   } else {
     trackedMessages = createMessageRecords([activity]);
   }
@@ -203,11 +133,13 @@ app.on("message", async ({ send, activity, api }) => {
 });
 
 app.on("install.add", async ({ send }) => {
-  await send(
-    "👋 Hi! I'm the Event Management bot.\n\n" +
-      "Attach an .xlsx with the paperclip in a 1:1 chat (Upload from this device). " +
-      "I only use a file after I confirm its exact name — I will not silently use a local 202611_* workbook."
-  );
+  try {
+    await send(
+      "👋 Hi! I'm the Event Management bot. Ask me about the event Excel workbook and I will look up the details."
+    );
+  } catch (error) {
+    logger.error(`Welcome message failed: ${describeNetworkError(error)}`);
+  }
 });
 
 (async () => {

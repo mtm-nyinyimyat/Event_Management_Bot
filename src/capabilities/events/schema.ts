@@ -11,11 +11,12 @@ export const LOOKUP_EVENTS_SCHEMA: ObjectSchema = {
     query: {
       type: "string",
       description:
-        "Keywords in English or Burmese to match any sheet/column (member name, dance group, date, location, costume, cost). Leave empty for an overview.",
+        "Keywords in English or Burmese. Prefer a sheet focus word: Agenda, Participants, Volunteer, Ferry, Table. For a person, use their name. Leave empty for sheet summaries only.",
     },
     max_results: {
       type: "number",
-      description: "Maximum matching rows to return. Defaults to 20.",
+      description:
+        "Maximum rows to return per sheet when listing. Count/total questions can keep the default; use up to 80 for full lists. Defaults to 80.",
     },
   },
   required: [],

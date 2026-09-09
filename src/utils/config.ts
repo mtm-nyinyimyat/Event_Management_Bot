@@ -98,10 +98,8 @@ export function validateEnvironment(logger: ILogger): void {
   if (getEventsSource() === "graph") {
     assertGraphExcelConfig();
     logger.debug(`📄 Excel source: Microsoft Graph (${describeGraphExcelConfig()})`);
-  } else if (getEventsSource() === "chat") {
-    logger.debug("📄 Excel source: chat uploads only (no local data/ fallback)");
   } else {
-    logger.debug("📄 Excel source: local file (set EVENTS_SOURCE=chat to require chat uploads)");
+    logger.debug("📄 Excel source: local file (set EVENTS_SOURCE=graph to use Teams/SharePoint)");
   }
 
   if (DATABASE_CONFIG.type === "mssql") {

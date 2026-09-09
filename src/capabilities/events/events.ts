@@ -10,24 +10,20 @@ import { LOOKUP_EVENTS_SCHEMA, LookupEventsArgs } from "./schema";
 export class EventsCapability extends BaseCapability {
   readonly name = "events";
 
-  createPrompt(context: MessageContext): ChatPrompt {
+  createPrompt(_context: MessageContext): ChatPrompt {
     const modelConfig = this.getModelConfig("events");
-    const conversationId = context.conversationId;
-    const userId = context.userId;
 
     const prompt = new ChatPrompt({
       instructions: EVENTS_PROMPT,
       model: createChatModel(modelConfig),
     }).function(
       "lookup_events",
-      "Search all sheets in the Excel workbook (chat upload preferred; remembered across chats) and return matching rows",
+      "Search the event Excel workbook by sheet/topic and return summaries plus matching rows",
       LOOKUP_EVENTS_SCHEMA,
       async ({ query, max_results }: LookupEventsArgs) => {
         this.logger.debug(`📊 lookup_events query="${query || ""}"`);
         try {
-          return JSON.stringify(
-            await searchWorkbook(query || "", max_results ?? 20, { conversationId, userId })
-          );
+          return JSON.stringify(await searchWorkbook(query || "", max_results ?? 80));
         } catch (error) {
           const message = error instanceof Error ? error.message : "Unknown Excel error";
           this.logger.error(`❌ Excel lookup failed: ${message}`);
@@ -43,7 +39,7 @@ export class EventsCapability extends BaseCapability {
 
 export const EVENTS_CAPABILITY_DEFINITION: CapabilityDefinition = {
   name: "events",
-  manager_desc: `**events**: Use for questions about the party/event Excel workbook uploaded in any chat (English or Burmese) — dance members, team leaders, practice schedules, rehearsal locations, costumes, buy/rent lists, costs, and related remarks. The last uploaded workbook is remembered across private/group/channel chats. Examples: "who is on ရှမ်းအက", "Practice_Schedule for 09/13", "ဝယ်ငှားစာရင်း", "list dance members". If no file is loaded yet, ask the user to attach an .xlsx.`,
+  manager_desc: `**events**: Use for any question about the event Excel workbook (English or Burmese) — participants counts, agenda/program, volunteers, ferry routes/drivers, table seating, beverages, karaoke. Examples: "how many participants", "list the agenda", "who is on ferry", "volunteer list", "where does X sit".`,
   handler: async (context: MessageContext, logger: ILogger) => {
     const capability = new EventsCapability(logger);
     const result = await capability.processRequest(context);
