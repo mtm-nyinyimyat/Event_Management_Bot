@@ -4,6 +4,11 @@ import * as XLSX from "xlsx";
 import { clearRagIndex, ensureWorkbookIndexed, retrieveHybrid } from "../rag";
 import { getRagConfig } from "../rag/config";
 import {
+  clearQueryCaches,
+  normalizeCacheQuery,
+  workbookSearchCache,
+} from "../utils/queryCache";
+import {
   assertGraphExcelConfig,
   describeGraphExcelConfig,
   readAllowedExcelWorkbooksFromGraph,
@@ -54,7 +59,7 @@ const conversationWorkbooks = new Map<string, CachedWorkbook>();
 const userWorkbooks = new Map<string, CachedWorkbook>();
 
 const UPLOAD_PERSIST_PATH = path.join(process.cwd(), "data", ".last-chat-upload.json");
-const DEFAULT_MAX_RESULTS = 80;
+const DEFAULT_MAX_RESULTS = 20;
 
 function cacheTtlMs(): number {
   const raw = Number(process.env.EVENTS_CACHE_TTL_MS || 5 * 60 * 1000);
@@ -994,7 +999,22 @@ const SHEET_QUERY_HINTS: Array<{ sheetIncludes: string; hints: string[] }> = [
   { sheetIncludes: "ferry", hints: ["ferry", "ဖယ်ရီ", "အပြန်", "driver"] },
   {
     sheetIncludes: "participant",
-    hints: ["participant", "participants", "attendee", "attendees", "member", "members", "မန်ဘာ", "ပါဝင်"],
+    hints: [
+      "participant",
+      "participants",
+      "attendee",
+      "attendees",
+      "member",
+      "members",
+      "beverage",
+      "drink",
+      "beer",
+      "juice",
+      "cocktail",
+      "karaoke",
+      "မန်ဘာ",
+      "ပါဝင်",
+    ],
   },
   {
     sheetIncludes: "table layout",
@@ -1063,6 +1083,57 @@ function isCountOrSummaryQuery(query: string): boolean {
 function isListQuery(query: string): boolean {
   const q = normalizeText(query);
   return /\b(list|show|all|full|every|entire)\b/.test(q) || q.includes("စာရင်း");
+}
+
+function isBeverageQuery(query: string): boolean {
+  const q = normalizeText(query);
+  return (
+    /\b(beverage|beverages|drink|drinks|beer|juice|cocktail|cocktial)\b/.test(q) ||
+    q.includes("အရည်") ||
+    q.includes("ဘီယာ") ||
+    q.includes("ဂျူးစ်") ||
+    q.includes("ကော့တေး")
+  );
+}
+
+/** Preferred drink type from the user query, used to filter Participants.Beverage. */
+function beverageFilterTerm(query: string): "beer" | "juice" | "cocktail" | "any" {
+  const q = normalizeText(query);
+  if (/\bbeer\b/.test(q) || q.includes("ဘီယာ")) {
+    return "beer";
+  }
+  if (/\bjuice\b/.test(q) || q.includes("ဂျူးစ်")) {
+    return "juice";
+  }
+  if (/\bcocktail\b/.test(q) || /\bcocktial\b/.test(q) || q.includes("ကော့တေး")) {
+    return "cocktail";
+  }
+  return "any";
+}
+
+function filterParticipantBeverageRows(rows: EventRecord[], query: string): EventRecord[] {
+  const term = beverageFilterTerm(query);
+  return rows.filter((row) => {
+    const beverage = String(row.Beverage || "").trim();
+    if (!beverage) {
+      return false;
+    }
+    const upper = beverage.toUpperCase();
+    // "ALL" means every drink option (beer + juice + cocktail)
+    if (upper === "ALL") {
+      return term === "any" || term === "beer" || term === "juice" || term === "cocktail";
+    }
+    if (term === "beer") {
+      return upper.includes("BEER");
+    }
+    if (term === "juice") {
+      return upper.includes("JUICE");
+    }
+    if (term === "cocktail") {
+      return upper.includes("COCKTAIL") || upper.includes("COCKTIAL");
+    }
+    return true;
+  });
 }
 
 function isMenuQuery(query: string): boolean {
@@ -1225,7 +1296,7 @@ function answerHintForQuery(query: string, sheets: SheetData[]): string | undefi
     return undefined;
   }
 
-  if (isCountOrSummaryQuery(query)) {
+  if (isCountOrSummaryQuery(query) && !isBeverageQuery(query)) {
     const participants = sheets.find((sheet) => /participant/i.test(sheet.sheet));
     if (participants?.summary) {
       return `Use Participants.summary.total_people / participate / cannot_participate. Do not dump every row.`;
@@ -1248,6 +1319,13 @@ function answerHintForQuery(query: string, sheets: SheetData[]): string | undefi
       }`;
     }
     return `For menu questions use Table Layout menu rows (Category + Dish) or summary.menu_by_category. Quote Dish exactly; never invent/translate dish names.`;
+  }
+
+  if (isBeverageQuery(query)) {
+    const participants = sheets.find((sheet) => /participant/i.test(sheet.sheet));
+    const rows = participants?.rows || [];
+    const term = beverageFilterTerm(query);
+    return `BEVERAGE LIST FROM Participants ONLY (${rows.length} people, filter=${term}). List EVERY Name + Beverage from rows. Do not omit anyone. Do not use Table Layout Guest-N seats. Prefer summary.by_beverage for label totals when counting by exact label.`;
   }
 
   if (isFerryQuery(query)) {
@@ -1300,6 +1378,36 @@ export async function searchWorkbook(
       ? { conversationId: conversationIdOrOptions }
       : conversationIdOrOptions || {};
 
+  const limit = resultLimit(maxResults);
+  const trimmedQuery = query.trim();
+  const cacheKey = [
+    "search",
+    normalizeCacheQuery(trimmedQuery),
+    String(limit),
+    options.conversationId || "",
+    options.userId || "",
+  ].join("::");
+
+  const cached = workbookSearchCache.get(cacheKey) as WorkbookSearchResult | undefined;
+  if (cached) {
+    return {
+      ...cached,
+      answer_hint: cached.answer_hint
+        ? `${cached.answer_hint} (cached)`
+        : "Cached workbook lookup result.",
+    };
+  }
+
+  const result = await searchWorkbookUncached(trimmedQuery, limit, options);
+  workbookSearchCache.set(cacheKey, result);
+  return result;
+}
+
+async function searchWorkbookUncached(
+  trimmedQuery: string,
+  limit: number,
+  options: WorkbookLookupOptions
+): Promise<WorkbookSearchResult> {
   const sheetsData = await loadWorkbook(false, options);
   const sourceType = workbookCache?.sourceType || getEventsSource();
   const source =
@@ -1307,8 +1415,6 @@ export async function searchWorkbook(
     (sourceType === "graph" ? describeGraphExcelConfig() : resolveExcelPath());
   const fileName = workbookCache?.fileName;
   const totalRows = sheetsData.reduce((sum, sheet) => sum + sheet.rows.length, 0);
-  const limit = resultLimit(maxResults);
-  const trimmedQuery = query.trim();
 
   if (!trimmedQuery) {
     const sheets = sheetsData.map((sheet) =>
@@ -1343,6 +1449,28 @@ export async function searchWorkbook(
         match_count: menuRows.length,
         retrieval: "lexical",
         answer_hint: answerHintForQuery(trimmedQuery, [sheet]),
+        sheets: [sheet],
+      };
+    }
+  }
+
+  // Beverage questions: full Participants.Beverage filter (RAG topK truncates lists)
+  if (isBeverageQuery(trimmedQuery)) {
+    const participantsSheet = sheetsData.find((sheet) => /participant/i.test(sheet.sheet));
+    if (participantsSheet) {
+      const beverageRows = filterParticipantBeverageRows(participantsSheet.rows, trimmedQuery);
+      const sheet = withSheetStats(participantsSheet, beverageRows);
+      const term = beverageFilterTerm(trimmedQuery);
+      return {
+        source,
+        source_type: sourceType,
+        file_name: fileName,
+        total_rows: totalRows,
+        match_count: beverageRows.length,
+        retrieval: "lexical",
+        answer_hint:
+          answerHintForQuery(trimmedQuery, [sheet]) ||
+          `List all ${beverageRows.length} Participants with Beverage matching ${term}.`,
         sheets: [sheet],
       };
     }
@@ -1444,6 +1572,7 @@ export async function searchWorkbook(
 export function clearWorkbookCache(): void {
   workbookCache = null;
   clearRagIndex();
+  clearQueryCaches();
 }
 
 export function clearUploadedWorkbooks(): void {

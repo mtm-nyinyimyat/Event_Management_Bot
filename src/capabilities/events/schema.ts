@@ -11,13 +11,12 @@ export const LOOKUP_EVENTS_SCHEMA: ObjectSchema = {
     query: {
       type: "string",
       description:
-        "Natural-language keywords in English or Burmese. Prefer a sheet focus word: Agenda, Participants, Volunteer, Ferry, Table. For a person, use their name or a short question. Leave empty for sheet summaries only.",
+        "Natural-language keywords in English or Burmese. Prefer a sheet focus word: Agenda, Participants, Volunteer, Ferry, Table. For drinks use beer/juice/cocktail/beverage. For a person, use their name or a short question. Leave empty for sheet summaries only.",
     },
     max_results: {
       type: "number",
       description:
-        "Maximum rows to return per sheet when listing. Count/total questions can keep the default; use up to 80 for full lists. Defaults to 80.",
+        "Maximum rows to return. Keep small for fuzzy RAG (default 20). Beverage/menu list queries return the full filtered set from the tool regardless.",
     },
   },
-  required: [],
 };

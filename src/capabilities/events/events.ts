@@ -23,7 +23,12 @@ export class EventsCapability extends BaseCapability {
       async ({ query, max_results }: LookupEventsArgs) => {
         this.logger.debug(`📊 lookup_events query="${query || ""}"`);
         try {
-          return JSON.stringify(await searchWorkbook(query || "", max_results ?? 80));
+          const result = await searchWorkbook(query || "", max_results ?? 20);
+          const fromCache = /\(cached\)|Cached workbook/i.test(result.answer_hint || "");
+          if (fromCache) {
+            this.logger.debug(`🗃️ lookup_events cache hit query="${query || ""}"`);
+          }
+          return JSON.stringify(result);
         } catch (error) {
           const message = error instanceof Error ? error.message : "Unknown Excel error";
           this.logger.error(`❌ Excel lookup failed: ${message}`);

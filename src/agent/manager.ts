@@ -3,6 +3,7 @@ import { ILogger } from "@microsoft/teams.common";
 import { CAPABILITY_DEFINITIONS } from "../capabilities/registry";
 import { createChatModel, getModelConfig } from "../utils/config";
 import { MessageContext } from "../utils/messageContext";
+import { answerCache, normalizeCacheQuery } from "../utils/queryCache";
 import { extractTimeRange } from "../utils/utils";
 import { generateManagerPrompt } from "./prompt";
 
@@ -28,9 +29,13 @@ export class ManagerPrompt {
       `🤖 Manager model=${managerModelConfig.model} baseUrl=${managerModelConfig.baseUrl}`
     );
 
-    // Keep recent turns only — full history can re-send old Groq errors and blow token budgets
+    // Keep a short window only — Groq free gpt-oss-120b is ~8K TPM; history balloons fast
+    const historyLimit = Math.max(2, Number(process.env.MANAGER_HISTORY_LIMIT || 6) || 6);
     const history = await this.context.memory.values();
-    const recentHistory = history.slice(-20);
+    const recentHistory = history.slice(-historyLimit).map((msg) => ({
+      role: msg.role,
+      content: msg.content,
+    }));
 
     const prompt = new ChatPrompt({
       instructions: generateManagerPrompt(CAPABILITY_DEFINITIONS),
@@ -96,24 +101,65 @@ export class ManagerPrompt {
   }
 
   async processRequest(): Promise<ManagerResult> {
+    const normalizedQuestion = normalizeCacheQuery(this.context.text);
+    const answerKey = `answer::${normalizedQuestion}`;
+
+    if (normalizedQuestion) {
+      const cachedAnswer = answerCache.get(answerKey);
+      if (cachedAnswer) {
+        this.logger.debug(`🗃️ Answer cache hit for "${normalizedQuestion}"`);
+        return { response: cachedAnswer };
+      }
+    }
+
     try {
       await this.initialize();
       const response = await this.prompt.send(this.context.text);
-      return {
-        response: response.content || "No response generated",
-      };
+      const text = response.content || "No response generated";
+
+      if (
+        normalizedQuestion &&
+        text &&
+        !/^sorry,/i.test(text) &&
+        !/rate limit|error processing|provider is busy/i.test(text)
+      ) {
+        answerCache.set(answerKey, text);
+      }
+
+      return { response: text };
     } catch (error) {
       const status =
         typeof error === "object" && error !== null && "status" in error
           ? (error as { status?: number }).status
           : undefined;
       const message = error instanceof Error ? error.message : "Unknown error";
-      this.logger.error(`❌ Error in Manager: ${status ? `${status} ` : ""}${message}`);
+      const cause =
+        typeof error === "object" && error !== null && "cause" in error
+          ? (error as { cause?: unknown }).cause
+          : undefined;
+      const causeText =
+        cause instanceof Error
+          ? cause.message
+          : cause
+            ? JSON.stringify(cause)
+            : "";
+      this.logger.error(
+        `❌ Error in Manager: ${status ? `${status} ` : ""}${message}${
+          causeText ? ` | cause: ${causeText}` : ""
+        }`
+      );
 
       if (status === 503) {
         return {
           response:
             "The AI provider is busy right now (503). Wait a few seconds and send the message again.",
+        };
+      }
+
+      if (status === 429 || /rate limit|tokens per minute|TPM/i.test(message)) {
+        return {
+          response:
+            "AI rate limit hit. Wait a bit and try again, or switch models.",
         };
       }
 

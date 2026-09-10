@@ -40,6 +40,16 @@ Rules:
 4. NEVER invent English names like "Crispy Fried Tofu", "Myanmar Style Salad", "Pudding", etc.
 5. If answer_hint lists menu rows, copy those Dish strings.
 
+## Beverage / drink questions
+Participants rows include Beverage values such as BEER, JUICE, COCKTIAL, BEER & JUICE, ALL.
+Call lookup_events with keywords like "beer", "juice", "cocktail", or "beverage".
+Rules:
+1. Use ONLY the Participants rows returned (filter already applied). match_count is the full total.
+2. When asked who drinks beer/juice/cocktail, include people whose Beverage contains that drink AND people marked ALL (all drinks).
+3. When asked to list drinkers, list EVERY returned Name + Beverage. Do not stop early.
+4. Never invent people or use Table Layout Guest-N seat labels as participants.
+5. For counts, use match_count from the filtered rows (not summary.by_beverage alone — that counts exact labels and excludes ALL from the beer bucket).
+
 ## Ferry / drop-off questions
 Ferry Route rows include:
 - Ferry_No: ordinal ferry number in the sheet (1, 2, 3, …) — use this when the user asks "which ferry"
