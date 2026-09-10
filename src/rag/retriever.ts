@@ -78,10 +78,28 @@ function lexicalScore(text: string, query: string): number {
   return hits / terms.length;
 }
 
-function workbookFingerprint(sheets: SheetData[], source: string, loadedAt: number): string {
-  const rowCount = sheets.reduce((sum, sheet) => sum + sheet.rows.length, 0);
-  const sheetNames = sheets.map((sheet) => sheet.sheet).join("|");
-  return `${source}::${loadedAt}::${sheets.length}::${rowCount}::${sheetNames}`;
+function hashText(value: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+/** Content-based fingerprint (stable across process restarts / workbook TTL reloads). */
+function workbookFingerprint(
+  sheets: SheetData[],
+  source: string,
+  embeddingModel: string
+): string {
+  const chunks = chunkWorkbookSheets(sheets);
+  let contentHash = 2166136261;
+  for (const chunk of chunks) {
+    contentHash ^= hashText(`${chunk.id}\0${chunk.text}`);
+    contentHash = Math.imul(contentHash, 16777619);
+  }
+  return `${source}::${embeddingModel}::${chunks.length}::${contentHash >>> 0}`;
 }
 
 function getClient(config: RagRuntimeConfig): EmbeddingClient {
@@ -91,8 +109,9 @@ function getClient(config: RagRuntimeConfig): EmbeddingClient {
   return embeddingClient;
 }
 
-export function clearRagIndex(): void {
-  workbookVectorStore.clear();
+export function clearRagIndex(options?: { persist?: boolean }): void {
+  // Default: drop warm cache only so SQLite can reload the same content after restart.
+  workbookVectorStore.clear({ persist: options?.persist === true });
   indexingPromise = null;
 }
 
@@ -101,24 +120,37 @@ export async function ensureWorkbookIndexed(
   meta: { source: string; loadedAt: number },
   config: RagRuntimeConfig
 ): Promise<void> {
-  if (!config.enabled) {
+  const client = getClient(config);
+  const fingerprint = workbookFingerprint(sheets, meta.source, client.model);
+
+  if (
+    workbookVectorStore.getFingerprint() === fingerprint &&
+    workbookVectorStore.getProvider() === client.provider &&
+    workbookVectorStore.getModel() === client.model &&
+    workbookVectorStore.size > 0
+  ) {
     return;
   }
 
-  const fingerprint = workbookFingerprint(sheets, meta.source, meta.loadedAt);
-  if (workbookVectorStore.getFingerprint() === fingerprint && workbookVectorStore.size > 0) {
+  // Prefer persisted SQLite index over re-embedding
+  if (workbookVectorStore.loadFromDb(fingerprint, client.provider, client.model)) {
+    console.debug(
+      `🗃️ RAG index loaded from SQLite (${workbookVectorStore.size} chunks, model=${client.model})`
+    );
     return;
   }
 
   if (indexingPromise) {
     await indexingPromise;
-    if (workbookVectorStore.getFingerprint() === fingerprint && workbookVectorStore.size > 0) {
+    if (
+      workbookVectorStore.getFingerprint() === fingerprint &&
+      workbookVectorStore.size > 0
+    ) {
       return;
     }
   }
 
   indexingPromise = (async () => {
-    const client = getClient(config);
     const chunks = chunkWorkbookSheets(sheets);
     const embeddings = await embedInBatches(
       client,
@@ -130,7 +162,14 @@ export async function ensureWorkbookIndexed(
       embedding: embeddings[index],
     }));
 
-    workbookVectorStore.replaceAll(indexed, fingerprint);
+    workbookVectorStore.replaceAll(indexed, fingerprint, {
+      provider: client.provider,
+      model: client.model,
+      persist: true,
+    });
+    console.debug(
+      `💾 RAG index embedded and saved to SQLite (${indexed.length} chunks, model=${client.model})`
+    );
   })();
 
   try {

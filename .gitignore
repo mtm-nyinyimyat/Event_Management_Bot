@@ -23,6 +23,8 @@ dist/
 
 # Ignore database files
 src/storage/conversations.db
+src/storage/rag_vectors.db
+src/storage/rag_vectors.db-*
 
 # Persisted chat Excel upload cache
 data/.last-chat-upload.json

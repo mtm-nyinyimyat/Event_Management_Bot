@@ -2,13 +2,6 @@ import type { EmbeddingConfig } from "./embeddings";
 import type { EmbeddingProviderName } from "./types";
 import type { RagRuntimeConfig } from "./retriever";
 
-function parseBool(value: string | undefined, fallback: boolean): boolean {
-  if (value === undefined || value === "") {
-    return fallback;
-  }
-  return !["0", "false", "no", "off"].includes(value.trim().toLowerCase());
-}
-
 function resolveApiKey(): string {
   return (
     process.env.EMBEDDING_API_KEY ||
@@ -74,9 +67,14 @@ export function getRagConfig(): RagRuntimeConfig {
   const topK = Number(process.env.RAG_TOP_K || 6);
   const hybridAlpha = Number(process.env.RAG_HYBRID_ALPHA || 0.65);
   const minScore = Number(process.env.RAG_MIN_SCORE || 0.12);
+  const enabledRaw = process.env.RAG_ENABLED;
+  const enabled =
+    enabledRaw === undefined || enabledRaw === ""
+      ? true
+      : !["0", "false", "no", "off"].includes(enabledRaw.trim().toLowerCase());
 
   return {
-    enabled: parseBool(process.env.RAG_ENABLED, true),
+    enabled,
     topK: Number.isFinite(topK) ? Math.max(1, Math.min(topK, 50)) : 6,
     hybridAlpha: Number.isFinite(hybridAlpha) ? Math.min(1, Math.max(0, hybridAlpha)) : 0.65,
     minScore: Number.isFinite(minScore) ? minScore : 0.12,

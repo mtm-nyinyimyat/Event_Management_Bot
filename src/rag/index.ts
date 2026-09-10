@@ -7,4 +7,5 @@ export {
   type RagRuntimeConfig,
 } from "./retriever";
 export { createEmbeddingClient, type EmbeddingConfig } from "./embeddings";
-export type { RagSearchResult, EmbeddingProviderName } from "./types";
+export { getSqliteVectorStore, SqliteVectorStore } from "./sqliteVectorStore";
+export { workbookVectorStore } from "./vectorStore";

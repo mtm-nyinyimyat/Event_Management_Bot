@@ -909,6 +909,7 @@ async function loadGraphWorkbook(): Promise<CachedWorkbook> {
 export interface WorkbookLookupOptions {
   conversationId?: string;
   userId?: string;
+  requesterName?: string;
 }
 
 export async function loadWorkbook(
@@ -930,18 +931,17 @@ export async function loadWorkbook(
   workbookCache = source === "graph" ? await loadGraphWorkbook() : loadLocalWorkbook();
 
   const ragConfig = getRagConfig();
-  if (ragConfig.enabled) {
-    try {
-      await ensureWorkbookIndexed(workbookCache.sheets, {
-        source: workbookCache.source,
-        loadedAt: workbookCache.loadedAt,
-      }, ragConfig);
-    } catch (error) {
-      // Lexical search still works if indexing fails
-      console.warn(
-        `RAG index failed: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
+  try {
+    await ensureWorkbookIndexed(workbookCache.sheets, {
+      source: workbookCache.source,
+      loadedAt: workbookCache.loadedAt,
+    }, ragConfig);
+  } catch (error) {
+    console.warn(
+      `RAG index failed, falling back to structured/lexical: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
   }
 
   return workbookCache.sheets;
@@ -1157,6 +1157,82 @@ function isFerryQuery(query: string): boolean {
     q.includes("လမ်း") ||
     q.includes("မှတ်တိုင်")
   );
+}
+
+function isSeatingQuery(query: string): boolean {
+  const q = normalizeText(query);
+  return (
+    /\b(seat|seating|sit|sits|sitting|table|where\s+do\s+i|where\s+will\s+i|my\s+table|my\s+seat)\b/.test(
+      q
+    ) ||
+    q.includes("စားပွဲ") ||
+    q.includes("ထိုင်") ||
+    q.includes("နေရာ")
+  );
+}
+
+function isSelfReferenceQuery(query: string): boolean {
+  const q = normalizeText(query);
+  return (
+    /\b(i|me|my|myself|mine)\b/.test(q) ||
+    q.includes("ကျွန်တော်") ||
+    q.includes("ကျွန်မ") ||
+    q.includes("ကျွန်ုပ်") ||
+    q.includes("ကိုယ်") ||
+    q.includes("ငါ")
+  );
+}
+
+function personNamesMatch(a: string, b: string): boolean {
+  const left = normalizeText(a).replace(/\s+/g, " ").trim();
+  const right = normalizeText(b).replace(/\s+/g, " ").trim();
+  if (!left || !right) {
+    return false;
+  }
+  if (left === right) {
+    return true;
+  }
+  // Prefer full-name containment only when one name is clearly the other
+  if (left.includes(right) || right.includes(left)) {
+    const shorter = left.length <= right.length ? left : right;
+    if (shorter.split(" ").filter((token) => token.length > 1).length >= 2) {
+      return true;
+    }
+  }
+
+  const leftTokens = [...new Set(left.split(" ").filter((token) => token.length > 1))];
+  const rightTokens = [...new Set(right.split(" ").filter((token) => token.length > 1))];
+  if (!leftTokens.length || !rightTokens.length) {
+    return false;
+  }
+
+  const leftSet = new Set(leftTokens);
+  const overlap = rightTokens.filter((token) => leftSet.has(token)).length;
+  if (rightTokens.length === 1) {
+    return leftTokens.length === 1 && overlap === 1;
+  }
+  // Require most of the query tokens (avoid "Nyi" matching many people)
+  return overlap >= Math.ceil(rightTokens.length * 0.75);
+}
+
+function filterSeatingRowsForPerson(rows: EventRecord[], personName: string): EventRecord[] {
+  const matches = rows.filter(
+    (row) =>
+      row.Name &&
+      row.Table &&
+      !row.Section &&
+      personNamesMatch(row.Name, personName)
+  );
+
+  const normalizedQuery = normalizeText(personName).replace(/\s+/g, " ").trim();
+  const exact = matches.filter(
+    (row) => normalizeText(row.Name || "").replace(/\s+/g, " ").trim() === normalizedQuery
+  );
+  if (exact.length) {
+    return exact;
+  }
+
+  return matches;
 }
 
 function filterMenuRows(rows: EventRecord[], query: string): EventRecord[] {
@@ -1386,6 +1462,7 @@ export async function searchWorkbook(
     String(limit),
     options.conversationId || "",
     options.userId || "",
+    normalizeCacheQuery(options.requesterName || ""),
   ].join("::");
 
   const cached = workbookSearchCache.get(cacheKey) as WorkbookSearchResult | undefined;
@@ -1435,7 +1512,7 @@ async function searchWorkbookUncached(
   const summaryOnly = isCountOrSummaryQuery(trimmedQuery) && !isListQuery(trimmedQuery);
   const ragConfig = getRagConfig();
 
-  // Menu questions: return structured Category/Dish rows from Table Layout only (no hallucination surface)
+  // Menu questions: structured Category/Dish rows (before RAG)
   if (isMenuQuery(trimmedQuery)) {
     const tableSheet = sheetsData.find((sheet) => /table layout/i.test(sheet.sheet));
     if (tableSheet) {
@@ -1454,7 +1531,7 @@ async function searchWorkbookUncached(
     }
   }
 
-  // Beverage questions: full Participants.Beverage filter (RAG topK truncates lists)
+  // Beverage questions: full Participants.Beverage filter (before RAG)
   if (isBeverageQuery(trimmedQuery)) {
     const participantsSheet = sheetsData.find((sheet) => /participant/i.test(sheet.sheet));
     if (participantsSheet) {
@@ -1476,7 +1553,31 @@ async function searchWorkbookUncached(
     }
   }
 
-  // Count/summary questions stay on structured sheet summaries (more reliable than vectors)
+  // Self seating: Table Layout Name → Table using Teams sender name (before RAG)
+  if (isSeatingQuery(trimmedQuery) && isSelfReferenceQuery(trimmedQuery)) {
+    const tableSheet = sheetsData.find((sheet) => /table layout/i.test(sheet.sheet));
+    const lookupName = (options.requesterName || "").trim();
+
+    if (tableSheet && lookupName) {
+      const seatRows = filterSeatingRowsForPerson(tableSheet.rows, lookupName);
+      const sheet = withSheetStats(tableSheet, seatRows);
+      return {
+        source,
+        source_type: sourceType,
+        file_name: fileName,
+        total_rows: totalRows,
+        match_count: seatRows.length,
+        retrieval: "lexical",
+        answer_hint:
+          seatRows.length > 0
+            ? `SENDER SEAT: Teams user "${lookupName}" maps to Excel Name="${seatRows[0].Name}", Table="${seatRows[0].Table}". Answer with that table. Do not ask for their name.`
+            : `No Table Layout seat found for Teams sender "${lookupName}". Say you could not find their seat in the seating chart; do not invent a table.`,
+        sheets: [sheet],
+      };
+    }
+  }
+
+  // Primary path: hybrid RAG
   if (!summaryOnly && ragConfig.enabled && workbookCache) {
     try {
       await ensureWorkbookIndexed(
@@ -1522,10 +1623,51 @@ async function searchWorkbookUncached(
       }
     } catch (error) {
       console.warn(
-        `RAG retrieve failed, falling back to lexical: ${
+        `RAG retrieve failed, falling back to structured/lexical: ${
           error instanceof Error ? error.message : String(error)
         }`
       );
+    }
+  }
+
+  // Fallback: menu questions return structured Category/Dish rows from Table Layout only
+  if (isMenuQuery(trimmedQuery)) {
+    const tableSheet = sheetsData.find((sheet) => /table layout/i.test(sheet.sheet));
+    if (tableSheet) {
+      const menuRows = filterMenuRows(tableSheet.rows, trimmedQuery);
+      const sheet = withSheetStats(tableSheet, menuRows);
+      return {
+        source,
+        source_type: sourceType,
+        file_name: fileName,
+        total_rows: totalRows,
+        match_count: menuRows.length,
+        retrieval: "lexical",
+        answer_hint: answerHintForQuery(trimmedQuery, [sheet]),
+        sheets: [sheet],
+      };
+    }
+  }
+
+  // Fallback: beverage questions use the full Participants.Beverage filter
+  if (isBeverageQuery(trimmedQuery)) {
+    const participantsSheet = sheetsData.find((sheet) => /participant/i.test(sheet.sheet));
+    if (participantsSheet) {
+      const beverageRows = filterParticipantBeverageRows(participantsSheet.rows, trimmedQuery);
+      const sheet = withSheetStats(participantsSheet, beverageRows);
+      const term = beverageFilterTerm(trimmedQuery);
+      return {
+        source,
+        source_type: sourceType,
+        file_name: fileName,
+        total_rows: totalRows,
+        match_count: beverageRows.length,
+        retrieval: "lexical",
+        answer_hint:
+          answerHintForQuery(trimmedQuery, [sheet]) ||
+          `List all ${beverageRows.length} Participants with Beverage matching ${term}.`,
+        sheets: [sheet],
+      };
     }
   }
 

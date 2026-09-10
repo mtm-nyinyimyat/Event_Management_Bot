@@ -325,13 +325,9 @@ export function validateEnvironment(logger: ILogger): void {
   }
 
   const rag = getRagConfig();
-  if (rag.enabled) {
-    logger.debug(
-      `🔎 RAG enabled (provider=${rag.embedding.provider}, model=${rag.embedding.model}, topK=${rag.topK})`
-    );
-  } else {
-    logger.debug("🔎 RAG disabled (set RAG_ENABLED=1 to turn on)");
-  }
+  logger.debug(
+    `🔎 RAG enabled (provider=${rag.embedding.provider}, model=${rag.embedding.model}, topK=${rag.topK})`
+  );
 
   if (DATABASE_CONFIG.type === "mssql") {
     const sqlRequiredVars = ["SQL_CONNECTION_STRING"];
@@ -370,4 +366,5 @@ export function logModelConfigs(logger: ILogger): void {
   logger.debug(`  Embedding provider: ${rag.embedding.provider}`);
   logger.debug(`  Embedding model: ${rag.embedding.model}`);
   logger.debug(`  Top K: ${rag.topK}`);
+  logger.debug(`  Vector store: SQLite (${process.env.RAG_DB_PATH || "src/storage/rag_vectors.db"})`);
 }

@@ -38,7 +38,7 @@ export class ManagerPrompt {
     }));
 
     const prompt = new ChatPrompt({
-      instructions: generateManagerPrompt(CAPABILITY_DEFINITIONS),
+      instructions: generateManagerPrompt(CAPABILITY_DEFINITIONS, this.context.userName),
       model: createChatModel(managerModelConfig),
       messages: recentHistory,
     })

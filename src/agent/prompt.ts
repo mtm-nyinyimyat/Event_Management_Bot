@@ -2,12 +2,19 @@ import { CapabilityDefinition } from "../capabilities/capability";
 
 // Mapping capability names and descriptions to feed into manager prompt
 // These fields are defined in CapabilityDefinition
-export function generateManagerPrompt(capabilities: CapabilityDefinition[]): string {
+export function generateManagerPrompt(
+  capabilities: CapabilityDefinition[],
+  senderName = "Unknown"
+): string {
   const namesList = capabilities.map((cap, i) => `${i + 1}. **${cap.name}**`).join("\n");
   const capabilityDescriptions = capabilities.map((cap) => `${cap.manager_desc}`).join("\n");
+  const name = (senderName || "").trim() || "Unknown";
 
   return `
 You are the Manager for the Event Management bot in Microsoft Teams. Your main job is to answer questions from the configured Excel workbook (English and Burmese).
+
+Current Teams sender: "${name}"
+If the user asks about themselves (I/me/my seat/table), delegate to **events** — do not ask them for their name.
 
 <AVAILABLE CAPABILITIES>
 ${namesList}
