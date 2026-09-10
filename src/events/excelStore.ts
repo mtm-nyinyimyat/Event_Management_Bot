@@ -1,6 +1,8 @@
 import fs from "fs";
 import path from "path";
 import * as XLSX from "xlsx";
+import { clearRagIndex, ensureWorkbookIndexed, retrieveHybrid } from "../rag";
+import { getRagConfig } from "../rag/config";
 import {
   assertGraphExcelConfig,
   describeGraphExcelConfig,
@@ -9,7 +11,10 @@ import {
 
 export type EventRecord = Record<string, string>;
 
-export type SheetSummary = Record<string, string | number | Record<string, number>>;
+export type SheetSummary = Record<
+  string,
+  string | number | Record<string, number> | Record<string, string>
+>;
 
 export interface SheetData {
   sheet: string;
@@ -25,6 +30,13 @@ export interface WorkbookSearchResult {
   total_rows: number;
   match_count: number;
   answer_hint?: string;
+  retrieval?: "hybrid" | "lexical" | "overview";
+  rag?: {
+    enabled: boolean;
+    provider: string;
+    top_k: number;
+    hit_count: number;
+  };
   sheets: SheetData[];
 }
 
@@ -371,10 +383,28 @@ function parseParticipantsSheet(values: unknown[][]): { rows: EventRecord[]; sum
   return { rows, summary };
 }
 
+function parseFerryDriverName(driverCell: string): string {
+  // "Driver  -    Ko Hein Htoo  ( 09 - 254481458 )" -> "Ko Hein Htoo"
+  return driverCell
+    .replace(/^driver\s*[-–—:]?\s*/i, "")
+    .replace(/\(\s*0?9[\d\s\-–—]*\s*\)/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseFerryCarPlate(ferryTitle: string): string {
+  // "4N-9173 Ferry List" -> "4N-9173"
+  const match = ferryTitle.match(/([A-Z0-9]+-[A-Z0-9]+)/i);
+  return match ? match[1].toUpperCase() : "";
+}
+
 function parseFerrySheet(values: unknown[][]): { rows: EventRecord[]; summary: SheetSummary } {
   const rows: EventRecord[] = [];
   let ferryName = "";
   let driver = "";
+  let driverName = "";
+  let carPlate = "";
+  let ferryNo = 0;
   let headers: string[] = [];
 
   for (let i = 0; i < values.length; i += 1) {
@@ -383,9 +413,12 @@ function parseFerrySheet(values: unknown[][]): { rows: EventRecord[]; summary: S
     const joined = row.map(cellToString).filter(Boolean).join(" | ");
 
     if (/ferry\s*list/i.test(joined) || /ferry\s*list/i.test(first)) {
+      ferryNo += 1;
       ferryName = first || joined;
-      const driverCell = row.map(cellToString).find((cell) => /driver/i.test(cell));
-      driver = driverCell || "";
+      const driverCell = row.map(cellToString).find((cell) => /driver/i.test(cell)) || "";
+      driver = driverCell;
+      driverName = parseFerryDriverName(driverCell);
+      carPlate = parseFerryCarPlate(ferryName);
       headers = [];
       continue;
     }
@@ -413,8 +446,11 @@ function parseFerrySheet(values: unknown[][]): { rows: EventRecord[]; summary: S
     }
 
     const record: EventRecord = {
+      Ferry_No: String(ferryNo),
       Ferry: ferryName,
+      ...(carPlate ? { Car_Plate: carPlate } : {}),
       ...(driver ? { Driver: driver } : {}),
+      ...(driverName ? { Driver_Name: driverName } : {}),
     };
     headers.forEach((header, column) => {
       if (!header || header.startsWith("Column")) {
@@ -434,12 +470,27 @@ function parseFerrySheet(values: unknown[][]): { rows: EventRecord[]; summary: S
 
   const people = rows.filter((row) => isNumbered(row["No."] || row.No));
   const byFerry = countByField(people, "Ferry");
+  const ferryIndex: Record<string, string> = {};
+  for (const row of people) {
+    if (row.Ferry_No && row.Ferry && !ferryIndex[row.Ferry_No]) {
+      const label = [
+        `Ferry ${row.Ferry_No}`,
+        row.Car_Plate || "",
+        row.Driver_Name || row.Driver || "",
+      ]
+        .filter(Boolean)
+        .join(" / ");
+      ferryIndex[row.Ferry_No] = label;
+    }
+  }
+
   return {
     rows,
     summary: {
       total_passengers: people.length,
       ferry_count: Object.keys(byFerry).length,
       by_ferry: byFerry,
+      ferry_index: ferryIndex,
     },
   };
 }
@@ -488,11 +539,49 @@ function drinkNearCell(values: unknown[][], row: number, col: number): string {
   return "";
 }
 
+function parseMenuItems(menuCells: string[]): {
+  rows: EventRecord[];
+  byCategory: Record<string, string>;
+} {
+  const rows: EventRecord[] = [];
+  const byCategory: Record<string, string> = {};
+  let category = "";
+
+  for (const raw of menuCells) {
+    const text = raw.trim();
+    if (!text || /^dinner\s*menu:?$/i.test(text)) {
+      continue;
+    }
+
+    // Category headers look like "Appetizer :" / "Main Course:"
+    if (/^.+:\s*$/.test(text) || /^(appetizer|salad|soup|main\s*course|dessert)\s*:?\s*$/i.test(text)) {
+      category = text.replace(/:\s*$/, "").trim();
+      continue;
+    }
+
+    if (!category) {
+      continue;
+    }
+
+    rows.push({
+      Section: "Menu",
+      Category: category,
+      Dish: text,
+    });
+
+    byCategory[category] = byCategory[category]
+      ? `${byCategory[category]} | ${text}`
+      : text;
+  }
+
+  return { rows, byCategory };
+}
+
 function parseTableLayoutSheet(values: unknown[][]): { rows: EventRecord[]; summary: SheetSummary } {
   const rows: EventRecord[] = [];
   const namesByTable: Record<string, string[]> = {};
   const drinksByTable: Record<string, Record<string, number>> = {};
-  const menu: string[] = [];
+  const menuCells: string[] = [];
   const beverageSummary: EventRecord[] = [];
 
   // Menu column on the right
@@ -500,7 +589,7 @@ function parseTableLayoutSheet(values: unknown[][]): { rows: EventRecord[]; summ
     for (let c = 14; c < (values[r] || []).length; c += 1) {
       const text = cellToString((values[r] || [])[c]);
       if (text) {
-        menu.push(text);
+        menuCells.push(text);
       }
     }
   }
@@ -598,9 +687,8 @@ function parseTableLayoutSheet(values: unknown[][]): { rows: EventRecord[]; summ
     }
   }
 
-  if (menu.length) {
-    rows.push({ Section: "Menu", Content: menu.join(" | ") });
-  }
+  const menu = parseMenuItems(menuCells);
+  rows.push(...menu.rows);
   for (const drinkRow of beverageSummary) {
     rows.push({
       Section: "Beverage Summary",
@@ -623,6 +711,9 @@ function parseTableLayoutSheet(values: unknown[][]): { rows: EventRecord[]; summ
         Object.entries(namesByTable).map(([table, names]) => [table, names.join(", ")])
       ),
       drinks_by_table: drinksByTable,
+      ...(Object.keys(menu.byCategory).length
+        ? { menu_by_category: menu.byCategory }
+        : {}),
     },
   };
 }
@@ -832,6 +923,22 @@ export async function loadWorkbook(
   }
 
   workbookCache = source === "graph" ? await loadGraphWorkbook() : loadLocalWorkbook();
+
+  const ragConfig = getRagConfig();
+  if (ragConfig.enabled) {
+    try {
+      await ensureWorkbookIndexed(workbookCache.sheets, {
+        source: workbookCache.source,
+        loadedAt: workbookCache.loadedAt,
+      }, ragConfig);
+    } catch (error) {
+      // Lexical search still works if indexing fails
+      console.warn(
+        `RAG index failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
   return workbookCache.sheets;
 }
 
@@ -891,7 +998,23 @@ const SHEET_QUERY_HINTS: Array<{ sheetIncludes: string; hints: string[] }> = [
   },
   {
     sheetIncludes: "table layout",
-    hints: ["table", "seat", "seating", "layout", "menu", "စားပွဲ"],
+    hints: [
+      "table",
+      "seat",
+      "seating",
+      "layout",
+      "menu",
+      "appetizer",
+      "salad",
+      "soup",
+      "dessert",
+      "main course",
+      "dinner",
+      "dish",
+      "စားပွဲ",
+      "ဟင်း",
+      "မီနူး",
+    ],
   },
 ];
 
@@ -942,6 +1065,59 @@ function isListQuery(query: string): boolean {
   return /\b(list|show|all|full|every|entire)\b/.test(q) || q.includes("စာရင်း");
 }
 
+function isMenuQuery(query: string): boolean {
+  const q = normalizeText(query);
+  return (
+    /\b(menu|appetizer|salad|soup|dessert|main\s*course|dinner\s*menu|dish|dishes)\b/.test(q) ||
+    q.includes("မီနူး") ||
+    q.includes("ဟင်း") ||
+    q.includes("အာလူး") ||
+    q.includes("သုပ်") ||
+    q.includes("အသီး")
+  );
+}
+
+function isFerryQuery(query: string): boolean {
+  const q = normalizeText(query);
+  return (
+    /\b(ferry|driver|drop-?off|pickup|route)\b/.test(q) ||
+    q.includes("ဖယ်ရီ") ||
+    q.includes("အပြန်") ||
+    q.includes("လမ်း") ||
+    q.includes("မှတ်တိုင်")
+  );
+}
+
+function filterMenuRows(rows: EventRecord[], query: string): EventRecord[] {
+  const menuRows = rows.filter((row) => row.Section === "Menu" && row.Dish);
+  if (!menuRows.length) {
+    return [];
+  }
+
+  const q = normalizeText(query);
+  const categoryHints: Array<{ category: RegExp; terms: RegExp }> = [
+    { category: /appetizer/i, terms: /\bappetizer\b/ },
+    { category: /salad/i, terms: /\bsalad\b|သုပ်/ },
+    { category: /soup/i, terms: /\bsoup\b|ဟင်းချို/ },
+    { category: /main/i, terms: /\bmain\b|main\s*course/ },
+    { category: /dessert/i, terms: /\bdessert\b|အသီး/ },
+  ];
+
+  for (const hint of categoryHints) {
+    if (hint.terms.test(q)) {
+      const matched = menuRows.filter((row) => hint.category.test(row.Category || ""));
+      if (matched.length) {
+        return matched;
+      }
+    }
+  }
+
+  const filtered = menuRows.filter((row) =>
+    matchesQuery([row.Category, row.Dish, row.Section].filter(Boolean).join(" "), query)
+  );
+  return filtered.length ? filtered : menuRows;
+}
+
 function queryTargetsSheet(sheetName: string, query: string): boolean {
   const name = normalizeText(sheetName);
   const q = normalizeText(query).trim();
@@ -965,67 +1141,71 @@ function queryTargetsSheet(sheetName: string, query: string): boolean {
   );
 }
 
-function compactRow(row: EventRecord): EventRecord {
-  const preferred = [
-    "No.",
-    "No",
-    "Name",
-    "NAME",
-    "Detail",
-    "Description",
-    "Start Time",
-    "End Time",
-    "Period",
-    "PM",
-    "Event Participate",
-    "Karaoke",
-    "Office to Event",
-    "Event to Home",
-    "Ferry Note",
-    "Beverage",
-    "Volunteer",
-    "Ferry",
-    "Driver",
-    "Location",
-    "Gps Point",
-    "MTM to Event",
-    "Event To Home",
-    "Table",
-    "Section",
-    "Content",
-    "Remark",
-    "日本語",
-  ];
+function isNoiseColumnKey(key: string): boolean {
+  if (!key || key.startsWith("__")) {
+    return true;
+  }
+  if (key.startsWith("Column_") || key.startsWith("__EMPTY")) {
+    return true;
+  }
+  return false;
+}
+
+/** Column order discovered from workbook rows (first-seen key order). */
+function fieldOrderFromRows(rows: EventRecord[]): string[] {
+  const order: string[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    for (const key of Object.keys(row)) {
+      if (isNoiseColumnKey(key) || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      order.push(key);
+    }
+  }
+  return order;
+}
+
+/**
+ * Keep non-empty fields from the workbook row.
+ * Field names come from the file (plus parser-added keys like Ferry_No), not a fixed schema.
+ */
+function compactRow(row: EventRecord, fieldOrder?: string[]): EventRecord {
+  const keys = fieldOrder?.length
+    ? fieldOrder
+    : Object.keys(row).filter((key) => !isNoiseColumnKey(key));
 
   const out: EventRecord = {};
-  for (const key of preferred) {
-    if (row[key]) {
-      out[key === "NAME" ? "Name" : key] = row[key];
+  for (const key of keys) {
+    if (isNoiseColumnKey(key)) {
+      continue;
+    }
+    const value = row[key]?.trim();
+    if (!value) {
+      continue;
+    }
+    out[key === "NAME" ? "Name" : key] = value;
+  }
+
+  // Sparse rows may have extra keys not in the sheet-wide order
+  if (fieldOrder?.length) {
+    for (const [key, value] of Object.entries(row)) {
+      if (isNoiseColumnKey(key) || out[key] || out.Name === value || !value?.trim()) {
+        continue;
+      }
+      out[key === "NAME" ? "Name" : key] = value.trim();
     }
   }
 
-  // Keep other short useful fields if preferred missed them
-  for (const [key, value] of Object.entries(row)) {
-    if (out[key] || out.Name === value) {
-      continue;
-    }
-    if (key.startsWith("Column_") || key.startsWith("__EMPTY")) {
-      continue;
-    }
-    if (key.length > 40) {
-      continue;
-    }
-    if (value) {
-      out[key] = value;
-    }
-  }
   return out;
 }
 
 function withSheetStats(sheet: SheetData, rows: EventRecord[], options?: { summaryOnly?: boolean }): SheetData {
+  const fieldOrder = fieldOrderFromRows(rows.length ? rows : sheet.rows);
   const compactRows = options?.summaryOnly
-    ? rows.slice(0, 5).map(compactRow)
-    : rows.map(compactRow);
+    ? rows.slice(0, 5).map((row) => compactRow(row, fieldOrder))
+    : rows.map((row) => compactRow(row, fieldOrder));
 
   return {
     sheet: sheet.sheet,
@@ -1056,6 +1236,42 @@ function answerHintForQuery(query: string, sheets: SheetData[]): string | undefi
     }
     return `Prefer each sheet's summary and numbered_item_count for totals.`;
   }
+
+  if (isMenuQuery(query)) {
+    const table = sheets.find((sheet) => /table layout/i.test(sheet.sheet));
+    const menuRows = (table?.rows || []).filter((row) => row.Section === "Menu" && row.Dish);
+    const summaryMenu = table?.summary?.menu_by_category;
+    if (menuRows.length || summaryMenu) {
+      const lines = menuRows.map((row) => `${row.Category}: ${row.Dish}`);
+      return `MENU FROM EXCEL ONLY. Quote Dish text exactly (keep Burmese). Do not translate or invent English dish names. Rows: ${
+        lines.join(" || ") || JSON.stringify(summaryMenu)
+      }`;
+    }
+    return `For menu questions use Table Layout menu rows (Category + Dish) or summary.menu_by_category. Quote Dish exactly; never invent/translate dish names.`;
+  }
+
+  if (isFerryQuery(query)) {
+    const ferrySheet = sheets.find((sheet) => /ferry/i.test(sheet.sheet) || /အပြန်/.test(sheet.sheet));
+    if (ferrySheet?.rows?.length) {
+      const q = normalizeText(query);
+      const exact = ferrySheet.rows.find((row) => {
+        const location = normalizeText(row.Location || "");
+        return (
+          location &&
+          (location.includes(q) ||
+            q
+              .split(/[,\s၊]+/)
+              .filter((t) => t.length > 1)
+              .every((t) => location.includes(t)))
+        );
+      });
+      if (exact?.Ferry_No) {
+        return `Location match: answer with Ferry_No=${exact.Ferry_No}, Driver_Name=${exact.Driver_Name || exact.Driver || ""}, Car_Plate=${exact.Car_Plate || ""}, Location=${exact.Location || ""}. Do not invent other ferries/drivers.`;
+      }
+      return `For ferry/drop-off questions use Ferry_No, Driver_Name, Car_Plate, and Location from matching ferry rows. Ferry_No is the sheet order (1,2,3…). Never invent names or car plates.`;
+    }
+  }
+
   return undefined;
 }
 
@@ -1104,12 +1320,87 @@ export async function searchWorkbook(
       file_name: fileName,
       total_rows: totalRows,
       match_count: totalRows,
+      retrieval: "overview",
       answer_hint: "Workbook overview. Use each sheet.summary and numbered_item_count. Call again with a sheet keyword for details.",
       sheets,
     };
   }
 
   const summaryOnly = isCountOrSummaryQuery(trimmedQuery) && !isListQuery(trimmedQuery);
+  const ragConfig = getRagConfig();
+
+  // Menu questions: return structured Category/Dish rows from Table Layout only (no hallucination surface)
+  if (isMenuQuery(trimmedQuery)) {
+    const tableSheet = sheetsData.find((sheet) => /table layout/i.test(sheet.sheet));
+    if (tableSheet) {
+      const menuRows = filterMenuRows(tableSheet.rows, trimmedQuery);
+      const sheet = withSheetStats(tableSheet, menuRows);
+      return {
+        source,
+        source_type: sourceType,
+        file_name: fileName,
+        total_rows: totalRows,
+        match_count: menuRows.length,
+        retrieval: "lexical",
+        answer_hint: answerHintForQuery(trimmedQuery, [sheet]),
+        sheets: [sheet],
+      };
+    }
+  }
+
+  // Count/summary questions stay on structured sheet summaries (more reliable than vectors)
+  if (!summaryOnly && ragConfig.enabled && workbookCache) {
+    try {
+      await ensureWorkbookIndexed(
+        sheetsData,
+        { source: workbookCache.source, loadedAt: workbookCache.loadedAt },
+        ragConfig
+      );
+      const rag = await retrieveHybrid(trimmedQuery, sheetsData, {
+        ...ragConfig,
+        topK: Math.min(limit, ragConfig.topK),
+      });
+
+      if (rag.sheets.length > 0 || rag.hits.length > 0) {
+        return {
+          source,
+          source_type: sourceType,
+          file_name: fileName,
+          total_rows: totalRows,
+          match_count: rag.match_count,
+          retrieval: "hybrid",
+          rag: {
+            enabled: true,
+            provider: rag.provider,
+            top_k: rag.top_k,
+            hit_count: rag.hits.length,
+          },
+          answer_hint: answerHintForQuery(
+            trimmedQuery,
+            rag.sheets.map((sheet) => ({
+              sheet: sheet.sheet,
+              rows: sheet.rows,
+              summary: sheet.summary,
+              numbered_item_count: sheet.numbered_item_count,
+            }))
+          ),
+          sheets: rag.sheets.map((sheet) => ({
+            sheet: sheet.sheet,
+            numbered_item_count: sheet.numbered_item_count,
+            summary: sheet.summary,
+            rows: sheet.rows.slice(0, limit),
+          })),
+        };
+      }
+    } catch (error) {
+      console.warn(
+        `RAG retrieve failed, falling back to lexical: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
   const targeted = sheetsData.filter((sheet) => queryTargetsSheet(sheet.sheet, trimmedQuery));
   const candidateSheets = targeted.length > 0 ? targeted : sheetsData;
   const sheets: SheetData[] = [];
@@ -1138,6 +1429,13 @@ export async function searchWorkbook(
     file_name: fileName,
     total_rows: totalRows,
     match_count: matchCount,
+    retrieval: "lexical",
+    rag: {
+      enabled: ragConfig.enabled,
+      provider: ragConfig.embedding.provider,
+      top_k: ragConfig.topK,
+      hit_count: matchCount,
+    },
     answer_hint: answerHintForQuery(trimmedQuery, sheets),
     sheets,
   };
@@ -1145,6 +1443,7 @@ export async function searchWorkbook(
 
 export function clearWorkbookCache(): void {
   workbookCache = null;
+  clearRagIndex();
 }
 
 export function clearUploadedWorkbooks(): void {

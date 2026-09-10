@@ -2,6 +2,7 @@ import { OpenAIChatModel } from "@microsoft/teams.openai";
 import { ILogger } from "@microsoft/teams.common";
 import { getEventsSource } from "../events/excelStore";
 import { assertGraphExcelConfig, describeGraphExcelConfig } from "../events/graphExcelClient";
+import { getRagConfig } from "../rag/config";
 
 export interface ModelConfig {
   model: string;
@@ -31,16 +32,19 @@ export const DATABASE_CONFIG: DatabaseConfig = {
   sqlitePath: process.env.CONVERSATIONS_DB_PATH,
 };
 
-const GROQ_OPENAI_BASE_URL = "https://api.groq.com/openai/v1";
+const GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/";
+const DEFAULT_MODEL = "gemini-2.5-flash";
 
 function resolveApiKey(): string {
   return (
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
     process.env.OPENAI_API_KEY ||
     process.env.GROQ_API_KEY ||
-    process.env.GEMINI_API_KEY ||
+    process.env.XKIRO_API_KEY ||
     process.env.AOAI_API_KEY ||
     ""
-  );
+  ).trim();
 }
 
 function buildModelConfig(model: string): ModelConfig {
@@ -59,12 +63,12 @@ function buildModelConfig(model: string): ModelConfig {
   return {
     model: process.env.OPENAI_MODEL || model,
     apiKey,
-    baseUrl: process.env.OPENAI_BASE_URL || GROQ_OPENAI_BASE_URL,
+    baseUrl: process.env.OPENAI_BASE_URL || GEMINI_OPENAI_BASE_URL,
   };
 }
 
 function getSharedModelConfig(): ModelConfig {
-  return buildModelConfig("openai/gpt-oss-120b");
+  return buildModelConfig(DEFAULT_MODEL);
 }
 
 export function getModelConfig(_capabilityType: string): ModelConfig {
@@ -88,10 +92,12 @@ export function createChatModel(config: ModelConfig): OpenAIChatModel {
   });
 }
 
+export { getRagConfig, getEmbeddingConfig } from "../rag/config";
+
 export function validateEnvironment(logger: ILogger): void {
   if (!resolveApiKey()) {
     throw new Error(
-      "Missing OPENAI_API_KEY. For Groq gpt-oss-120b, create a key at https://console.groq.com"
+      "Missing GEMINI_API_KEY. Create a key in Google AI Studio: https://aistudio.google.com/apikey"
     );
   }
 
@@ -100,6 +106,15 @@ export function validateEnvironment(logger: ILogger): void {
     logger.debug(`📄 Excel source: Microsoft Graph (${describeGraphExcelConfig()})`);
   } else {
     logger.debug("📄 Excel source: local file (set EVENTS_SOURCE=graph to use Teams/SharePoint)");
+  }
+
+  const rag = getRagConfig();
+  if (rag.enabled) {
+    logger.debug(
+      `🔎 RAG enabled (provider=${rag.embedding.provider}, model=${rag.embedding.model}, topK=${rag.topK})`
+    );
+  } else {
+    logger.debug("🔎 RAG disabled (set RAG_ENABLED=1 to turn on)");
   }
 
   if (DATABASE_CONFIG.type === "mssql") {
@@ -129,4 +144,11 @@ export function logModelConfigs(logger: ILogger): void {
   logger.debug("🔧 AI Model Configuration:");
   logger.debug(`  Provider: ${provider}`);
   logger.debug(`  Model: ${config.model}`);
+
+  const rag = getRagConfig();
+  logger.debug("🔧 RAG Configuration:");
+  logger.debug(`  Enabled: ${rag.enabled}`);
+  logger.debug(`  Embedding provider: ${rag.embedding.provider}`);
+  logger.debug(`  Embedding model: ${rag.embedding.model}`);
+  logger.debug(`  Top K: ${rag.topK}`);
 }

@@ -18,7 +18,7 @@ export class EventsCapability extends BaseCapability {
       model: createChatModel(modelConfig),
     }).function(
       "lookup_events",
-      "Search the event Excel workbook by sheet/topic and return summaries plus matching rows",
+      "Search the event Excel workbook with hybrid RAG (semantic + keyword) and return summaries plus matching rows",
       LOOKUP_EVENTS_SCHEMA,
       async ({ query, max_results }: LookupEventsArgs) => {
         this.logger.debug(`📊 lookup_events query="${query || ""}"`);

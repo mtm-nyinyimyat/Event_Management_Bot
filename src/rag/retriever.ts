@@ -1,0 +1,258 @@
+import type { SheetData } from "../events/excelStore";
+import { chunkWorkbookSheets, dynamicRow } from "./chunker";
+import {
+  createEmbeddingClient,
+  embedInBatches,
+  type EmbeddingClient,
+  type EmbeddingConfig,
+} from "./embeddings";
+import type { EmbeddingProviderName, IndexedChunk, RagHit, RagSearchResult } from "./types";
+import { workbookVectorStore } from "./vectorStore";
+
+export interface RagRuntimeConfig {
+  enabled: boolean;
+  topK: number;
+  hybridAlpha: number;
+  minScore: number;
+  embedding: EmbeddingConfig;
+}
+
+let embeddingClient: EmbeddingClient | null = null;
+let indexingPromise: Promise<void> | null = null;
+
+function normalizeText(value: string): string {
+  return value.toLocaleLowerCase("my").normalize("NFC");
+}
+
+function significantTerms(query: string): string[] {
+  const stop = new Set([
+    "a",
+    "an",
+    "all",
+    "are",
+    "count",
+    "for",
+    "give",
+    "how",
+    "in",
+    "is",
+    "item",
+    "items",
+    "list",
+    "many",
+    "me",
+    "of",
+    "please",
+    "show",
+    "the",
+    "them",
+    "total",
+    "what",
+    "who",
+    "about",
+  ]);
+
+  return normalizeText(query)
+    .split(/\s+/)
+    .map((term) => term.trim())
+    .filter((term) => term.length > 0 && !stop.has(term));
+}
+
+function lexicalScore(text: string, query: string): number {
+  const haystack = normalizeText(text);
+  const normalizedQuery = normalizeText(query).trim();
+  if (!normalizedQuery) {
+    return 0;
+  }
+
+  if (haystack.includes(normalizedQuery)) {
+    return 1;
+  }
+
+  const terms = significantTerms(query);
+  if (terms.length === 0) {
+    return 0;
+  }
+
+  const hits = terms.filter((term) => haystack.includes(term)).length;
+  return hits / terms.length;
+}
+
+function workbookFingerprint(sheets: SheetData[], source: string, loadedAt: number): string {
+  const rowCount = sheets.reduce((sum, sheet) => sum + sheet.rows.length, 0);
+  const sheetNames = sheets.map((sheet) => sheet.sheet).join("|");
+  return `${source}::${loadedAt}::${sheets.length}::${rowCount}::${sheetNames}`;
+}
+
+function getClient(config: RagRuntimeConfig): EmbeddingClient {
+  if (!embeddingClient || embeddingClient.provider !== config.embedding.provider) {
+    embeddingClient = createEmbeddingClient(config.embedding);
+  }
+  return embeddingClient;
+}
+
+export function clearRagIndex(): void {
+  workbookVectorStore.clear();
+  indexingPromise = null;
+}
+
+export async function ensureWorkbookIndexed(
+  sheets: SheetData[],
+  meta: { source: string; loadedAt: number },
+  config: RagRuntimeConfig
+): Promise<void> {
+  if (!config.enabled) {
+    return;
+  }
+
+  const fingerprint = workbookFingerprint(sheets, meta.source, meta.loadedAt);
+  if (workbookVectorStore.getFingerprint() === fingerprint && workbookVectorStore.size > 0) {
+    return;
+  }
+
+  if (indexingPromise) {
+    await indexingPromise;
+    if (workbookVectorStore.getFingerprint() === fingerprint && workbookVectorStore.size > 0) {
+      return;
+    }
+  }
+
+  indexingPromise = (async () => {
+    const client = getClient(config);
+    const chunks = chunkWorkbookSheets(sheets);
+    const embeddings = await embedInBatches(
+      client,
+      chunks.map((chunk) => chunk.text)
+    );
+
+    const indexed: IndexedChunk[] = chunks.map((chunk, index) => ({
+      ...chunk,
+      embedding: embeddings[index],
+    }));
+
+    workbookVectorStore.replaceAll(indexed, fingerprint);
+  })();
+
+  try {
+    await indexingPromise;
+  } finally {
+    indexingPromise = null;
+  }
+}
+
+export async function retrieveHybrid(
+  query: string,
+  sheets: SheetData[],
+  config: RagRuntimeConfig
+): Promise<RagSearchResult> {
+  const topK = Math.max(1, Math.min(config.topK, 50));
+  const client = getClient(config);
+  const [queryEmbedding] = await client.embed([query]);
+  const vectorHits = workbookVectorStore.search(queryEmbedding, Math.max(topK * 3, topK));
+
+  const merged = new Map<string, RagHit>();
+
+  for (const hit of vectorHits) {
+    const lex = lexicalScore(hit.chunk.text, query);
+    const score = config.hybridAlpha * hit.score + (1 - config.hybridAlpha) * lex;
+    merged.set(hit.chunk.id, {
+      chunk: hit.chunk,
+      score,
+      lexicalScore: lex,
+      vectorScore: hit.score,
+    });
+  }
+
+  // Ensure strong lexical matches are not missed by vector-only ranking
+  for (const sheet of sheets) {
+    sheet.rows.forEach((row, index) => {
+      const text = `Sheet: ${sheet.sheet} | ${Object.entries(row)
+        .filter(([key, value]) => !key.startsWith("__") && !key.startsWith("Column_") && !!value?.trim())
+        .map(([k, v]) => `${k}: ${v}`)
+        .join(" | ")}`;
+      const lex = lexicalScore(text, query);
+      if (lex < 0.34) {
+        return;
+      }
+      const id = `${sheet.sheet}::row::${index}`;
+      const existing = merged.get(id);
+      const vectorScore = existing?.vectorScore ?? 0;
+      const score = config.hybridAlpha * vectorScore + (1 - config.hybridAlpha) * lex;
+      if (!existing || score > existing.score) {
+        merged.set(id, {
+          chunk: { id, sheet: sheet.sheet, text, row: dynamicRow(row) },
+          score,
+          lexicalScore: lex,
+          vectorScore,
+        });
+      }
+    });
+  }
+
+  const ranked = [...merged.values()]
+    .filter((hit) => hit.score >= config.minScore || hit.lexicalScore >= 0.5)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topK);
+
+  const bySheet = new Map<
+    string,
+    {
+      sheet: string;
+      numbered_item_count?: number;
+      summary?: SheetData["summary"];
+      rows: Record<string, string>[];
+    }
+  >();
+
+  for (const hit of ranked) {
+    if (hit.chunk.row.__chunk_type === "summary") {
+      const sheetMeta = sheets.find((sheet) => sheet.sheet === hit.chunk.sheet);
+      if (!sheetMeta) {
+        continue;
+      }
+      if (!bySheet.has(hit.chunk.sheet)) {
+        bySheet.set(hit.chunk.sheet, {
+          sheet: hit.chunk.sheet,
+          numbered_item_count: sheetMeta.numbered_item_count,
+          summary: sheetMeta.summary,
+          rows: [],
+        });
+      }
+      continue;
+    }
+
+    const sheetMeta = sheets.find((sheet) => sheet.sheet === hit.chunk.sheet);
+    const bucket =
+      bySheet.get(hit.chunk.sheet) ||
+      ({
+        sheet: hit.chunk.sheet,
+        numbered_item_count: sheetMeta?.numbered_item_count,
+        summary: sheetMeta?.summary,
+        rows: [],
+      } as {
+        sheet: string;
+        numbered_item_count?: number;
+        summary?: SheetData["summary"];
+        rows: Record<string, string>[];
+      });
+
+    bucket.rows.push(dynamicRow(hit.chunk.row));
+    bySheet.set(hit.chunk.sheet, bucket);
+  }
+
+  return {
+    enabled: true,
+    provider: client.provider as EmbeddingProviderName,
+    match_count: ranked.length,
+    top_k: topK,
+    retrieval: "hybrid",
+    hits: ranked.map((hit) => ({
+      sheet: hit.chunk.sheet,
+      score: Number(hit.score.toFixed(4)),
+      lexical_score: Number(hit.lexicalScore.toFixed(4)),
+      vector_score: Number(hit.vectorScore.toFixed(4)),
+      row: dynamicRow(hit.chunk.row),
+    })),
+    sheets: [...bySheet.values()],
+  };
+}

@@ -11,7 +11,7 @@ export const LOOKUP_EVENTS_SCHEMA: ObjectSchema = {
     query: {
       type: "string",
       description:
-        "Keywords in English or Burmese. Prefer a sheet focus word: Agenda, Participants, Volunteer, Ferry, Table. For a person, use their name. Leave empty for sheet summaries only.",
+        "Natural-language keywords in English or Burmese. Prefer a sheet focus word: Agenda, Participants, Volunteer, Ferry, Table. For a person, use their name or a short question. Leave empty for sheet summaries only.",
     },
     max_results: {
       type: "number",

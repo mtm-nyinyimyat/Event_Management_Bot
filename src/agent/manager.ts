@@ -24,10 +24,18 @@ export class ManagerPrompt {
 
   private async createManagerPrompt(): Promise<ChatPrompt> {
     const managerModelConfig = getModelConfig("manager");
+    this.logger.debug(
+      `🤖 Manager model=${managerModelConfig.model} baseUrl=${managerModelConfig.baseUrl}`
+    );
+
+    // Keep recent turns only — full history can re-send old Groq errors and blow token budgets
+    const history = await this.context.memory.values();
+    const recentHistory = history.slice(-20);
+
     const prompt = new ChatPrompt({
       instructions: generateManagerPrompt(CAPABILITY_DEFINITIONS),
       model: createChatModel(managerModelConfig),
-      messages: await this.context.memory.values(),
+      messages: recentHistory,
     })
       .function(
         "calculate_time_range",
