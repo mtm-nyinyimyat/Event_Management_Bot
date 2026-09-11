@@ -110,8 +110,13 @@ function getClient(config: RagRuntimeConfig): EmbeddingClient {
 }
 
 export function clearRagIndex(options?: { persist?: boolean }): void {
-  // Default: drop warm cache only so SQLite can reload the same content after restart.
-  workbookVectorStore.clear({ persist: options?.persist === true });
+  // Fire-and-forget persist clear; callers that need await use clearRagIndexAsync
+  void workbookVectorStore.clear({ persist: options?.persist === true });
+  indexingPromise = null;
+}
+
+export async function clearRagIndexAsync(options?: { persist?: boolean }): Promise<void> {
+  await workbookVectorStore.clear({ persist: options?.persist === true });
   indexingPromise = null;
 }
 
@@ -122,6 +127,7 @@ export async function ensureWorkbookIndexed(
 ): Promise<void> {
   const client = getClient(config);
   const fingerprint = workbookFingerprint(sheets, meta.source, client.model);
+  const backend = workbookVectorStore.getBackend();
 
   if (
     workbookVectorStore.getFingerprint() === fingerprint &&
@@ -132,10 +138,10 @@ export async function ensureWorkbookIndexed(
     return;
   }
 
-  // Prefer persisted SQLite index over re-embedding
-  if (workbookVectorStore.loadFromDb(fingerprint, client.provider, client.model)) {
+  // Prefer persisted DB index over re-embedding
+  if (await workbookVectorStore.loadFromDb(fingerprint, client.provider, client.model)) {
     console.debug(
-      `🗃️ RAG index loaded from SQLite (${workbookVectorStore.size} chunks, model=${client.model})`
+      `🗃️ RAG index loaded from ${backend} (${workbookVectorStore.size} chunks, model=${client.model})`
     );
     return;
   }
@@ -162,13 +168,13 @@ export async function ensureWorkbookIndexed(
       embedding: embeddings[index],
     }));
 
-    workbookVectorStore.replaceAll(indexed, fingerprint, {
+    await workbookVectorStore.replaceAll(indexed, fingerprint, {
       provider: client.provider,
       model: client.model,
       persist: true,
     });
     console.debug(
-      `💾 RAG index embedded and saved to SQLite (${indexed.length} chunks, model=${client.model})`
+      `💾 RAG index embedded and saved to ${backend} (${indexed.length} chunks, model=${client.model})`
     );
   })();
 

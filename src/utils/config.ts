@@ -4,6 +4,8 @@ import type { Fetch } from "openai/core";
 import { getEventsSource } from "../events/excelStore";
 import { assertGraphExcelConfig, describeGraphExcelConfig } from "../events/graphExcelClient";
 import { getRagConfig } from "../rag/config";
+import { resolveVectorBackend } from "../rag/vectorStore";
+import { isPostgresConfigured, resolveDatabaseType } from "../storage/postgres";
 
 export interface ModelConfig {
   model: string;
@@ -14,23 +16,21 @@ export interface ModelConfig {
 }
 
 export interface DatabaseConfig {
-  type: "sqlite" | "mssql";
+  type: "mssql" | "postgres";
   connectionString?: string;
   server?: string;
   database?: string;
   username?: string;
   password?: string;
-  sqlitePath?: string;
 }
 
 export const DATABASE_CONFIG: DatabaseConfig = {
-  type: process.env.RUNNING_ON_AZURE === "1" ? "mssql" : "sqlite",
-  connectionString: process.env.SQL_CONNECTION_STRING,
-  server: process.env.SQL_SERVER,
-  database: process.env.SQL_DATABASE,
-  username: process.env.SQL_USERNAME,
-  password: process.env.SQL_PASSWORD,
-  sqlitePath: process.env.CONVERSATIONS_DB_PATH,
+  type: resolveDatabaseType(),
+  connectionString: process.env.SQL_CONNECTION_STRING || process.env.DATABASE_URL,
+  server: process.env.SQL_SERVER || process.env.PGHOST,
+  database: process.env.SQL_DATABASE || process.env.PGDATABASE,
+  username: process.env.SQL_USERNAME || process.env.PGUSER,
+  password: process.env.SQL_PASSWORD || process.env.PGPASSWORD,
 };
 
 const XKIRO_OPENAI_BASE_URL = "https://api.xkiro.com/v1";
@@ -329,22 +329,30 @@ export function validateEnvironment(logger: ILogger): void {
     `🔎 RAG enabled (provider=${rag.embedding.provider}, model=${rag.embedding.model}, topK=${rag.topK})`
   );
 
+  if (DATABASE_CONFIG.type === "postgres") {
+    if (!isPostgresConfigured()) {
+      throw new Error(
+        "Postgres required but PG* / DATABASE_URL is incomplete. Set PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE (or DATABASE_URL)."
+      );
+    }
+    logger.debug(
+      `✅ Postgres configuration validated (${process.env.PGDATABASE || "DATABASE_URL"})`
+    );
+  }
+
   if (DATABASE_CONFIG.type === "mssql") {
     const sqlRequiredVars = ["SQL_CONNECTION_STRING"];
     const sqlMissing = sqlRequiredVars.filter((envVar) => !process.env[envVar]);
     if (sqlMissing.length > 0) {
-      logger.warn(
-        `SQL Server configuration incomplete. Missing: ${sqlMissing.join(
-          ", "
-        )}. Falling back to SQLite.`
+      throw new Error(
+        `SQL Server configuration incomplete. Missing: ${sqlMissing.join(", ")}`
       );
-      DATABASE_CONFIG.type = "sqlite";
-    } else {
-      logger.debug("✅ SQL Server configuration validated");
     }
+    logger.debug("✅ SQL Server configuration validated");
   }
 
   logger.debug(`📦 Using database: ${DATABASE_CONFIG.type}`);
+  logger.debug(`📦 RAG vector store: ${resolveVectorBackend()}`);
   logger.debug("✅ Environment validation passed");
 }
 
@@ -366,5 +374,7 @@ export function logModelConfigs(logger: ILogger): void {
   logger.debug(`  Embedding provider: ${rag.embedding.provider}`);
   logger.debug(`  Embedding model: ${rag.embedding.model}`);
   logger.debug(`  Top K: ${rag.topK}`);
-  logger.debug(`  Vector store: SQLite (${process.env.RAG_DB_PATH || "src/storage/rag_vectors.db"})`);
+  logger.debug(
+    `  Vector store: postgres (${process.env.PGDATABASE || process.env.DATABASE_URL || "pg"})`
+  );
 }

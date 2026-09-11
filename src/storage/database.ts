@@ -1,7 +1,7 @@
 import { MessageRecord } from "./types";
 
 /**
- * Abstract database interface that both SQLite and MSSQL implementations follow
+ * Abstract database interface for Postgres and MSSQL implementations
  */
 export interface IDatabase {
   initialize(): Promise<void>;

@@ -1,10 +1,16 @@
 import { cosineSimilarity } from "./embeddings";
-import { getSqliteVectorStore } from "./sqliteVectorStore";
+import { getPostgresVectorStore } from "./postgresVectorStore";
 import type { IndexedChunk, RagChunk } from "./types";
+
+export type VectorBackendName = "postgres";
+
+export function resolveVectorBackend(): VectorBackendName {
+  return "postgres";
+}
 
 /**
  * Warm in-memory view of the active RAG index for fast cosine search.
- * Source of truth is SQLite (`rag_vectors.db`); this cache is rebuilt from DB or fresh embeds.
+ * Source of truth is Postgres (pgvector).
  */
 export class InMemoryVectorStore {
   private chunks: IndexedChunk[] = [];
@@ -28,23 +34,27 @@ export class InMemoryVectorStore {
     return this.model;
   }
 
-  clear(options?: { persist?: boolean }): void {
+  getBackend(): VectorBackendName {
+    return "postgres";
+  }
+
+  async clear(options?: { persist?: boolean }): Promise<void> {
     this.chunks = [];
     this.fingerprint = "";
     this.provider = "";
     this.model = "";
     if (options?.persist) {
-      getSqliteVectorStore().clear();
+      await getPostgresVectorStore().clear();
     }
   }
 
-  /** Load persisted index from SQLite when fingerprint/provider/model match. */
-  loadFromDb(fingerprint: string, provider: string, model: string): boolean {
-    const db = getSqliteVectorStore();
-    if (!db.hasFingerprint(fingerprint, provider, model)) {
+  /** Load persisted index when fingerprint/provider/model match. */
+  async loadFromDb(fingerprint: string, provider: string, model: string): Promise<boolean> {
+    const db = getPostgresVectorStore();
+    if (!(await db.hasFingerprint(fingerprint, provider, model))) {
       return false;
     }
-    const chunks = db.loadAll();
+    const chunks = await db.loadAll();
     if (!chunks.length) {
       return false;
     }
@@ -55,23 +65,25 @@ export class InMemoryVectorStore {
     return true;
   }
 
-  replaceAll(
+  async replaceAll(
     chunks: IndexedChunk[],
     fingerprint: string,
     meta: { provider: string; model: string; persist?: boolean }
-  ): void {
+  ): Promise<void> {
     this.chunks = chunks;
     this.fingerprint = fingerprint;
     this.provider = meta.provider;
     this.model = meta.model;
 
-    if (meta.persist !== false) {
-      getSqliteVectorStore().replaceAll(chunks, {
-        fingerprint,
-        provider: meta.provider,
-        model: meta.model,
-      });
+    if (meta.persist === false) {
+      return;
     }
+
+    await getPostgresVectorStore().replaceAll(chunks, {
+      fingerprint,
+      provider: meta.provider,
+      model: meta.model,
+    });
   }
 
   search(queryEmbedding: Float32Array, topK: number): Array<{ chunk: RagChunk; score: number }> {

@@ -2,10 +2,12 @@ export { chunkWorkbookSheets, dynamicRow, fieldOrderFromRows, fieldsFromRow } fr
 export { getRagConfig, getEmbeddingConfig } from "./config";
 export {
   clearRagIndex,
+  clearRagIndexAsync,
   ensureWorkbookIndexed,
   retrieveHybrid,
   type RagRuntimeConfig,
 } from "./retriever";
 export { createEmbeddingClient, type EmbeddingConfig } from "./embeddings";
-export { getSqliteVectorStore, SqliteVectorStore } from "./sqliteVectorStore";
-export { workbookVectorStore } from "./vectorStore";
+export { getPostgresVectorStore, PostgresVectorStore } from "./postgresVectorStore";
+export { workbookVectorStore, resolveVectorBackend } from "./vectorStore";
+export type { RagSearchResult, EmbeddingProviderName } from "./types";
