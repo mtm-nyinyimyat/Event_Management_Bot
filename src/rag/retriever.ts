@@ -7,7 +7,7 @@ import {
   type EmbeddingConfig,
 } from "./embeddings";
 import type { EmbeddingProviderName, IndexedChunk, RagHit, RagSearchResult } from "./types";
-import { workbookVectorStore } from "./vectorStore";
+import { clearAllWorkbookVectorStores, getWorkbookVectorStore } from "./vectorStore";
 
 export interface RagRuntimeConfig {
   enabled: boolean;
@@ -18,7 +18,7 @@ export interface RagRuntimeConfig {
 }
 
 let embeddingClient: EmbeddingClient | null = null;
-let indexingPromise: Promise<void> | null = null;
+const indexingPromises = new Map<string, Promise<void>>();
 
 function normalizeText(value: string): string {
   return value.toLocaleLowerCase("my").normalize("NFC");
@@ -109,54 +109,66 @@ function getClient(config: RagRuntimeConfig): EmbeddingClient {
   return embeddingClient;
 }
 
-export function clearRagIndex(options?: { persist?: boolean }): void {
-  // Fire-and-forget persist clear; callers that need await use clearRagIndexAsync
-  void workbookVectorStore.clear({ persist: options?.persist === true });
-  indexingPromise = null;
+function scopeKey(conversationId?: string): string {
+  return conversationId?.trim() || "__global__";
 }
 
-export async function clearRagIndexAsync(options?: { persist?: boolean }): Promise<void> {
-  await workbookVectorStore.clear({ persist: options?.persist === true });
-  indexingPromise = null;
+export function clearRagIndex(options?: { persist?: boolean; conversationId?: string }): void {
+  void clearRagIndexAsync(options);
+}
+
+export async function clearRagIndexAsync(options?: {
+  persist?: boolean;
+  conversationId?: string;
+}): Promise<void> {
+  await clearAllWorkbookVectorStores({
+    persist: options?.persist === true,
+    conversationId: options?.conversationId,
+  });
+  if (options?.conversationId) {
+    indexingPromises.delete(scopeKey(options.conversationId));
+  } else {
+    indexingPromises.clear();
+  }
 }
 
 export async function ensureWorkbookIndexed(
   sheets: SheetData[],
-  meta: { source: string; loadedAt: number },
+  meta: { source: string; loadedAt: number; conversationId?: string },
   config: RagRuntimeConfig
 ): Promise<void> {
   const client = getClient(config);
   const fingerprint = workbookFingerprint(sheets, meta.source, client.model);
-  const backend = workbookVectorStore.getBackend();
+  const store = getWorkbookVectorStore(meta.conversationId);
+  const backend = store.getBackend();
+  const key = scopeKey(meta.conversationId);
 
   if (
-    workbookVectorStore.getFingerprint() === fingerprint &&
-    workbookVectorStore.getProvider() === client.provider &&
-    workbookVectorStore.getModel() === client.model &&
-    workbookVectorStore.size > 0
+    store.getFingerprint() === fingerprint &&
+    store.getProvider() === client.provider &&
+    store.getModel() === client.model &&
+    store.size > 0
   ) {
     return;
   }
 
   // Prefer persisted DB index over re-embedding
-  if (await workbookVectorStore.loadFromDb(fingerprint, client.provider, client.model)) {
+  if (await store.loadFromDb(fingerprint, client.provider, client.model)) {
     console.debug(
-      `🗃️ RAG index loaded from ${backend} (${workbookVectorStore.size} chunks, model=${client.model})`
+      `🗃️ RAG index loaded from ${backend} (${store.size} chunks, model=${client.model}, scope=${key})`
     );
     return;
   }
 
-  if (indexingPromise) {
-    await indexingPromise;
-    if (
-      workbookVectorStore.getFingerprint() === fingerprint &&
-      workbookVectorStore.size > 0
-    ) {
+  const existing = indexingPromises.get(key);
+  if (existing) {
+    await existing;
+    if (store.getFingerprint() === fingerprint && store.size > 0) {
       return;
     }
   }
 
-  indexingPromise = (async () => {
+  const indexingPromise = (async () => {
     const chunks = chunkWorkbookSheets(sheets);
     const embeddings = await embedInBatches(
       client,
@@ -168,32 +180,36 @@ export async function ensureWorkbookIndexed(
       embedding: embeddings[index],
     }));
 
-    await workbookVectorStore.replaceAll(indexed, fingerprint, {
+    await store.replaceAll(indexed, fingerprint, {
       provider: client.provider,
       model: client.model,
       persist: true,
     });
     console.debug(
-      `💾 RAG index embedded and saved to ${backend} (${indexed.length} chunks, model=${client.model})`
+      `💾 RAG index embedded and saved to ${backend} (${indexed.length} chunks, model=${client.model}, scope=${key})`
     );
   })();
+
+  indexingPromises.set(key, indexingPromise);
 
   try {
     await indexingPromise;
   } finally {
-    indexingPromise = null;
+    indexingPromises.delete(key);
   }
 }
 
 export async function retrieveHybrid(
   query: string,
   sheets: SheetData[],
-  config: RagRuntimeConfig
+  config: RagRuntimeConfig,
+  conversationId?: string
 ): Promise<RagSearchResult> {
   const topK = Math.max(1, Math.min(config.topK, 50));
   const client = getClient(config);
+  const store = getWorkbookVectorStore(conversationId);
   const [queryEmbedding] = await client.embed([query]);
-  const vectorHits = workbookVectorStore.search(queryEmbedding, Math.max(topK * 3, topK));
+  const vectorHits = store.search(queryEmbedding, Math.max(topK * 3, topK));
 
   const merged = new Map<string, RagHit>();
 

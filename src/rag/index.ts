@@ -9,5 +9,9 @@ export {
 } from "./retriever";
 export { createEmbeddingClient, type EmbeddingConfig } from "./embeddings";
 export { getPostgresVectorStore, PostgresVectorStore } from "./postgresVectorStore";
-export { workbookVectorStore, resolveVectorBackend } from "./vectorStore";
+export {
+  workbookVectorStore,
+  getWorkbookVectorStore,
+  resolveVectorBackend,
+} from "./vectorStore";
 export type { RagSearchResult, EmbeddingProviderName } from "./types";

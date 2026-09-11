@@ -317,7 +317,14 @@ export function validateEnvironment(logger: ILogger): void {
     );
   }
 
-  if (getEventsSource() === "graph") {
+  const sessionMode = !["0", "false", "no", "off"].includes(
+    (process.env.EVENTS_SESSION_MODE || "1").trim().toLowerCase()
+  );
+  if (sessionMode) {
+    logger.debug(
+      "📄 Excel source: SharePoint URL session mode (paste URL → /start → Q&A → /end). Set EVENTS_SESSION_MODE=0 for local/graph fallback."
+    );
+  } else if (getEventsSource() === "graph") {
     assertGraphExcelConfig();
     logger.debug(`📄 Excel source: Microsoft Graph (${describeGraphExcelConfig()})`);
   } else {

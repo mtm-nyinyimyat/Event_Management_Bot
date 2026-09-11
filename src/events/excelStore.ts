@@ -143,6 +143,38 @@ export function getConversationWorkbook(conversationId: string): CachedWorkbook 
 
 export function clearConversationWorkbook(conversationId: string): void {
   conversationWorkbooks.delete(conversationId);
+  if (sharedUploadedWorkbook && workbookCache?.sourceType === "upload") {
+    // If this conversation owned the shared warm cache, drop it too.
+    const stillReferenced = [...conversationWorkbooks.values()].some(
+      (wb) => wb.source === sharedUploadedWorkbook?.source
+    );
+    if (!stillReferenced) {
+      sharedUploadedWorkbook = null;
+      workbookCache = null;
+      try {
+        if (fs.existsSync(UPLOAD_PERSIST_PATH)) {
+          fs.unlinkSync(UPLOAD_PERSIST_PATH);
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
+/** When true (default), Q&A uses only workbooks activated via SharePoint URL + /start. */
+export function isEventSessionMode(): boolean {
+  const raw = (process.env.EVENTS_SESSION_MODE || "1").trim().toLowerCase();
+  return !["0", "false", "no", "off"].includes(raw);
+}
+
+function resolveWorkbookOptions(
+  conversationIdOrOptions?: string | WorkbookLookupOptions
+): WorkbookLookupOptions {
+  if (typeof conversationIdOrOptions === "string") {
+    return { conversationId: conversationIdOrOptions };
+  }
+  return conversationIdOrOptions || {};
 }
 
 export function getSharedUploadedWorkbook(): CachedWorkbook | undefined {
@@ -914,10 +946,58 @@ export interface WorkbookLookupOptions {
 
 export async function loadWorkbook(
   forceRefresh = false,
-  _conversationIdOrOptions?: string | WorkbookLookupOptions
+  conversationIdOrOptions?: string | WorkbookLookupOptions
 ): Promise<SheetData[]> {
-  const source = getEventsSource();
+  const options = resolveWorkbookOptions(conversationIdOrOptions);
+  const conversationId = options.conversationId;
   const ttl = cacheTtlMs();
+
+  const uploaded = resolveUploadedWorkbook(conversationId, options.userId);
+  if (!uploaded && isEventSessionMode() && conversationId) {
+    try {
+      const { ensureActiveWorkbookInMemory } = await import("./eventSession.js");
+      await ensureActiveWorkbookInMemory(conversationId);
+    } catch (error) {
+      console.warn(
+        `Failed to rehydrate active event workbook: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  const resolvedUpload = resolveUploadedWorkbook(conversationId, options.userId);
+  if (resolvedUpload && (!forceRefresh || resolvedUpload.sourceType === "upload")) {
+    workbookCache = resolvedUpload;
+    const ragConfig = getRagConfig();
+    try {
+      await ensureWorkbookIndexed(
+        resolvedUpload.sheets,
+        {
+          source: resolvedUpload.source,
+          loadedAt: resolvedUpload.loadedAt,
+          conversationId,
+        },
+        ragConfig
+      );
+    } catch (error) {
+      console.warn(
+        `RAG index failed, falling back to structured/lexical: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+    return resolvedUpload.sheets;
+  }
+
+  if (isEventSessionMode()) {
+    throw new Error(
+      "No active event for this chat. Paste a SharePoint Excel URL, then send /start (or startevent). " +
+        "After the event, send /end (or endevent) to clear the data."
+    );
+  }
+
+  const source = getEventsSource();
 
   if (
     !forceRefresh &&
@@ -935,6 +1015,7 @@ export async function loadWorkbook(
     await ensureWorkbookIndexed(workbookCache.sheets, {
       source: workbookCache.source,
       loadedAt: workbookCache.loadedAt,
+      conversationId,
     }, ragConfig);
   } catch (error) {
     console.warn(
@@ -1486,11 +1567,13 @@ async function searchWorkbookUncached(
   options: WorkbookLookupOptions
 ): Promise<WorkbookSearchResult> {
   const sheetsData = await loadWorkbook(false, options);
-  const sourceType = workbookCache?.sourceType || getEventsSource();
+  const active =
+    resolveUploadedWorkbook(options.conversationId, options.userId) || workbookCache;
+  const sourceType = active?.sourceType || getEventsSource();
   const source =
-    workbookCache?.source ||
+    active?.source ||
     (sourceType === "graph" ? describeGraphExcelConfig() : resolveExcelPath());
-  const fileName = workbookCache?.fileName;
+  const fileName = active?.fileName;
   const totalRows = sheetsData.reduce((sum, sheet) => sum + sheet.rows.length, 0);
 
   if (!trimmedQuery) {
@@ -1578,17 +1661,26 @@ async function searchWorkbookUncached(
   }
 
   // Primary path: hybrid RAG
-  if (!summaryOnly && ragConfig.enabled && workbookCache) {
+  if (!summaryOnly && ragConfig.enabled && active) {
     try {
       await ensureWorkbookIndexed(
         sheetsData,
-        { source: workbookCache.source, loadedAt: workbookCache.loadedAt },
+        {
+          source: active.source,
+          loadedAt: active.loadedAt,
+          conversationId: options.conversationId,
+        },
         ragConfig
       );
-      const rag = await retrieveHybrid(trimmedQuery, sheetsData, {
-        ...ragConfig,
-        topK: Math.min(limit, ragConfig.topK),
-      });
+      const rag = await retrieveHybrid(
+        trimmedQuery,
+        sheetsData,
+        {
+          ...ragConfig,
+          topK: Math.min(limit, ragConfig.topK),
+        },
+        options.conversationId
+      );
 
       if (rag.sheets.length > 0 || rag.hits.length > 0) {
         return {

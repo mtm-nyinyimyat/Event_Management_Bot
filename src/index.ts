@@ -6,6 +6,14 @@ import { App } from "@microsoft/teams.apps";
 import { ConsoleLogger } from "@microsoft/teams.common";
 import { DevtoolsPlugin } from "@microsoft/teams.dev";
 import { ManagerPrompt } from "./agent/manager";
+import {
+  addPendingShareUrls,
+  endEventSession,
+  extractSharePointUrls,
+  isEndEventCommand,
+  isStartEventCommand,
+  startEventSession,
+} from "./events/eventSession";
 import { IDatabase } from "./storage/database";
 import { StorageFactory } from "./storage/storageFactory";
 import { logModelConfigs, validateEnvironment } from "./utils/config";
@@ -89,6 +97,14 @@ function isOutboundBlocked(error: unknown): boolean {
   return /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|certificate|unable to verify/i.test(text);
 }
 
+function stripMentions(text?: string): string {
+  return String(text || "")
+    .replace(/<\/?at>/gi, " ")
+    .replace(/<at>[^<]*<\/at>/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 app.on("message", async ({ send, activity, api }) => {
   const botMentioned = activity.entities?.some((e) => e.type === "mention");
   const context = botMentioned
@@ -105,13 +121,55 @@ app.on("message", async ({ send, activity, api }) => {
     }
 
     try {
-      const manager = new ManagerPrompt(context, logger.child("manager"));
-      const result = await manager.processRequest();
-      const formattedResult = finalizePromptResponse(result.response, context, logger);
+      const text = stripMentions(activity.text);
+      const conversationId = context.conversationId;
+      const userName = context.userName || activity.from?.name || "unknown";
 
-      const sent = await send(formattedResult);
-      formattedResult.id = sent.id;
-      trackedMessages = createMessageRecords([activity, formattedResult]);
+      // Lifecycle commands take priority over LLM routing
+      if (isStartEventCommand(text)) {
+        const confirmation = await startEventSession({
+          conversationId,
+          startedBy: userName,
+          logger: logger.child("event-session"),
+        });
+        const sent = await send(confirmation);
+        trackedMessages = createMessageRecords([activity]);
+        logger.debug(`Event start replied id=${sent.id}`);
+      } else if (isEndEventCommand(text)) {
+        const confirmation = await endEventSession({
+          conversationId,
+          logger: logger.child("event-session"),
+        });
+        const sent = await send(confirmation);
+        trackedMessages = createMessageRecords([activity]);
+        logger.debug(`Event end replied id=${sent.id}`);
+      } else {
+        const shareUrls = extractSharePointUrls(activity.text);
+        // Stage SharePoint URLs only when the message is primarily a link paste
+        const textWithoutUrls = shareUrls
+          .reduce((acc, url) => acc.replace(url, " "), text)
+          .replace(/\s+/g, " ")
+          .trim();
+        if (shareUrls.length > 0 && textWithoutUrls.length < 8) {
+          const session = await addPendingShareUrls(conversationId, shareUrls);
+          const confirmation =
+            `Saved ${shareUrls.length} SharePoint link(s) for this chat.\n` +
+            `Pending URL(s): ${session.pendingUrls.length}\n\n` +
+            `I will not process the workbook until you send /start or startevent.\n` +
+            `When the event is over, send /end or endevent to clear all event data.`;
+          const sent = await send(confirmation);
+          trackedMessages = createMessageRecords([activity]);
+          logger.debug(`Pending SharePoint URL(s) saved; replied id=${sent.id}`);
+        } else {
+          const manager = new ManagerPrompt(context, logger.child("manager"));
+          const result = await manager.processRequest();
+          const formattedResult = finalizePromptResponse(result.response, context, logger);
+
+          const sent = await send(formattedResult);
+          formattedResult.id = sent.id;
+          trackedMessages = createMessageRecords([activity, formattedResult]);
+        }
+      }
     } catch (error) {
       const detail = describeNetworkError(error);
       logger.error(`❌ Failed to handle/reply to message: ${detail}`);
@@ -121,6 +179,16 @@ app.on("message", async ({ send, activity, api }) => {
             "The bot received the Teams message but cannot call login.botframework.com or smba.trafficmanager.net:443. " +
             "Connect the corporate VPN, or set HTTPS_PROXY in .env if you use a proxy."
         );
+      }
+      try {
+        const failMsg =
+          error instanceof Error &&
+          /SharePoint|download|No active event|No SharePoint|Could not download/i.test(error.message)
+            ? error.message
+            : "Sorry — I hit an error handling that message. Please try again.";
+        await send(failMsg);
+      } catch {
+        // ignore secondary send failure
       }
       trackedMessages = createMessageRecords([activity]);
     }
@@ -135,7 +203,11 @@ app.on("message", async ({ send, activity, api }) => {
 app.on("install.add", async ({ send }) => {
   try {
     await send(
-      "👋 Hi! I'm the Event Management bot. Ask me about the event Excel workbook and I will look up the details."
+      "👋 Hi! I'm the Event Management bot.\n\n" +
+        "1) Paste a SharePoint Excel URL\n" +
+        "2) Send /start (or startevent) to load it\n" +
+        "3) Ask questions about the event\n" +
+        "4) Send /end (or endevent) when finished to clear the data"
     );
   } catch (error) {
     logger.error(`Welcome message failed: ${describeNetworkError(error)}`);
