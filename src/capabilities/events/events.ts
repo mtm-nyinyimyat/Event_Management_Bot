@@ -1,5 +1,6 @@
 import { ChatPrompt } from "@microsoft/teams.ai";
 import { ILogger } from "@microsoft/teams.common";
+import { ServiceUnavailableError } from "../../events/activeEventFile";
 import { searchWorkbook } from "../../events/excelStore";
 import { createChatModel } from "../../utils/config";
 import { MessageContext } from "../../utils/messageContext";
@@ -15,7 +16,7 @@ export class EventsCapability extends BaseCapability {
     const senderName = context.userName || "Unknown";
 
     const prompt = new ChatPrompt({
-      instructions: buildEventsPrompt(senderName),
+      instructions: buildEventsPrompt(senderName, context.activeEventFileName),
       model: createChatModel(modelConfig),
     }).function(
       "lookup_events",
@@ -27,7 +28,7 @@ export class EventsCapability extends BaseCapability {
         );
         try {
           const result = await searchWorkbook(query || "", max_results ?? 20, {
-            conversationId: context.conversationId,
+            conversationId: context.activeEventConversationId || context.conversationId,
             userId: context.userId,
             requesterName: senderName,
           });
@@ -63,23 +64,20 @@ export class EventsCapability extends BaseCapability {
         response: response.content || "No response generated",
       };
     } catch (error) {
-      return {
-        response: "",
-        error: error instanceof Error ? error.message : "Unknown error",
-      };
+      throw new ServiceUnavailableError(error);
     }
   }
 }
 
 export const EVENTS_CAPABILITY_DEFINITION: CapabilityDefinition = {
   name: "events",
-  manager_desc: `**events**: Use for any question about the event Excel workbook (English or Burmese) — participants counts, agenda/program, volunteers, ferry routes/drivers, table seating (including "where will I sit"), beverages, karaoke. Examples: "how many participants", "list the agenda", "who is on ferry", "volunteer list", "where does X sit", "where will I sit".`,
+  manager_desc: `**events**: ONLY capability for event Excel Q&A. Use for questions about the active event file (English or Burmese): participants, agenda, volunteers, ferry, seating, menu, beverages, karaoke. Do NOT use for general knowledge. If the user question is unrelated to that file, do not delegate — refuse with the event-file-only message.`,
   handler: async (context: MessageContext, logger: ILogger) => {
     const capability = new EventsCapability(logger);
     const result = await capability.processRequest(context);
     if (result.error) {
       logger.error(`❌ Error in Events Capability: ${result.error}`);
-      return `Error looking up events: ${result.error}`;
+      throw new ServiceUnavailableError(result.error);
     }
     return result.response || "No matching rows were found in the Excel file.";
   },

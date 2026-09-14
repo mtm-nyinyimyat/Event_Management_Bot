@@ -71,6 +71,10 @@ function isNonFileBodyAttachment(attachment: Attachment): boolean {
   if (contentType.startsWith("application/vnd.microsoft.card.")) {
     return true;
   }
+  // Teams stickers / animated emoticons arrive as image/* with no file name.
+  if (contentType.startsWith("image/") && !isExcelFileName(attachment.name)) {
+    return true;
+  }
   return false;
 }
 
@@ -129,6 +133,9 @@ function attachmentLooksLikeExcel(attachment: Attachment): boolean {
  * Classic symptom with supportsFiles=false: empty text + only text/html attachment.
  */
 export function looksLikeUndeliveredFileShare(activity: IMessageActivity): boolean {
+  if (isEmoticonOnlyActivity(activity)) {
+    return false;
+  }
   const text = (activity.text || "").replace(/<at>[^<]*<\/at>/gi, "").trim();
   if (text) {
     return false;
@@ -141,6 +148,31 @@ export function looksLikeUndeliveredFileShare(activity: IMessageActivity): boole
     return true; // empty message — often a file card the bot cannot see
   }
   return attachments.every((attachment) => isHtmlOrPlainBodyAttachment(attachment));
+}
+
+/** Teams animated emoji / sticker with no real user text. */
+export function isEmoticonOnlyActivity(activity: IMessageActivity): boolean {
+  const text = (activity.text || "").replace(/<at>[^<]*<\/at>/gi, "").trim();
+  if (text) {
+    return false;
+  }
+  const attachments = activity.attachments || [];
+  if (!attachments.length) {
+    return false;
+  }
+  let hasImage = false;
+  for (const attachment of attachments) {
+    const contentType = (attachment.contentType || "").toLowerCase();
+    if (contentType.startsWith("image/")) {
+      hasImage = true;
+      continue;
+    }
+    if (isHtmlOrPlainBodyAttachment(attachment)) {
+      continue;
+    }
+    return false;
+  }
+  return hasImage;
 }
 
 export const FILE_UPLOAD_HELP =
@@ -414,6 +446,91 @@ async function downloadExcelAttachment(attachment: Attachment): Promise<{
   }
 }
 
+export interface DownloadedExcelFile {
+  fileName: string;
+  buffer: Buffer;
+}
+
+/** True when this message likely carries an Excel upload/share the bot should handle. */
+export function activityLikelyHasExcelUpload(activity: IMessageActivity): boolean {
+  if (findExcelAttachments(activity).length > 0) {
+    return true;
+  }
+  return looksLikeUndeliveredFileShare(activity);
+}
+
+/**
+ * Download Excel bytes from chat attachments (preferred) or Graph file cards.
+ * Does not activate a workbook — callers stage or ingest as needed.
+ */
+export async function downloadExcelFilesFromActivity(
+  activity: IMessageActivity,
+  conversationId: string,
+  logger?: ILogger,
+  options?: { allowGraphFallback?: boolean }
+): Promise<DownloadedExcelFile[] | null> {
+  const allowGraphFallback = options?.allowGraphFallback !== false;
+  const allAttachments = activity.attachments || [];
+  logger?.debug(`📎 Activity attachments: ${describeActivityAttachments(activity)}`);
+
+  const fileLikeAttachments = allAttachments.filter((attachment) => !isNonFileBodyAttachment(attachment));
+  const excelAttachments = findExcelAttachments(activity);
+
+  if (excelAttachments.length > 0) {
+    const files: DownloadedExcelFile[] = [];
+    for (const attachment of excelAttachments) {
+      logger?.debug(`📎 Downloading chat Excel attachment: ${attachment.name || "(unnamed)"}`);
+      const downloaded = await downloadExcelAttachment(attachment);
+      if (!looksLikeZipOrXlsx(downloaded.buffer)) {
+        throw new Error(
+          `Downloaded "${downloaded.fileName}" but it does not look like a valid Excel file.`
+        );
+      }
+      files.push(downloaded);
+    }
+    return files;
+  }
+
+  if (fileLikeAttachments.length > 0) {
+    // Only hard-fail when the activity looked like an Excel share/upload.
+    // Stickers, images, and other non-Excel attachments should not trigger errors.
+    if (looksLikeUndeliveredFileShare(activity) || isExcelFileName(activity.text)) {
+      throw new Error(
+        `I received ${fileLikeAttachments.length} file attachment(s), but none looked like Excel (.xlsx).\n` +
+          `Details: ${describeActivityAttachments(activity)}`
+      );
+    }
+    logger?.debug(
+      `Ignoring ${fileLikeAttachments.length} non-Excel attachment(s): ${describeActivityAttachments(activity)}`
+    );
+    return null;
+  }
+
+  if (
+    allowGraphFallback &&
+    (looksLikeUndeliveredFileShare(activity) || !activity.text?.trim())
+  ) {
+    try {
+      const fromGraph = await ingestExcelFromGraphMessage(activity, conversationId, logger);
+      if (fromGraph) {
+        // Graph path already parsed sheets; re-download is not available here.
+        // Convert by asking Graph path to also return buffers — for now stage via sheets
+        // is handled by ingestExcelAttachmentsFromActivity. Prefer attachment path.
+        logger?.warn(
+          "Graph returned Excel metadata without raw buffers; use paperclip Upload from this device for permission-free testing."
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger?.warn(`Graph Excel fallback failed: ${message}`);
+    }
+
+    throw new Error(FILE_UPLOAD_HELP);
+  }
+
+  return null;
+}
+
 /**
  * If the message includes Excel attachments, download/parse them and remember
  * globally so any chat can query the workbook.
@@ -424,32 +541,19 @@ export async function ingestExcelAttachmentsFromActivity(
   logger?: ILogger,
   userId?: string
 ): Promise<{ confirmation: string; files: IngestedExcelAttachment[] } | null> {
-  const allAttachments = activity.attachments || [];
-  logger?.debug(`📎 Activity attachments: ${describeActivityAttachments(activity)}`);
+  const downloaded = await downloadExcelFilesFromActivity(activity, conversationId, logger, {
+    allowGraphFallback: false,
+  });
 
-  const fileLikeAttachments = allAttachments.filter((attachment) => !isNonFileBodyAttachment(attachment));
-  const excelAttachments = findExcelAttachments(activity);
-
-  if (excelAttachments.length > 0) {
+  if (downloaded && downloaded.length > 0) {
     const files: IngestedExcelAttachment[] = [];
     const allSheets: SheetData[] = [];
-
-    for (const attachment of excelAttachments) {
-      logger?.debug(`📎 Downloading chat Excel attachment: ${attachment.name || "(unnamed)"}`);
-      const { buffer, fileName } = await downloadExcelAttachment(attachment);
-      const loaded = await loadExcelBuffer(buffer, fileName);
+    for (const item of downloaded) {
+      const loaded = await loadExcelBuffer(item.buffer, item.fileName);
       files.push(loaded.file);
       allSheets.push(...loaded.sheets);
     }
-
     return storeLoadedWorkbook(files, allSheets, conversationId, userId);
-  }
-
-  if (fileLikeAttachments.length > 0) {
-    throw new Error(
-      `I received ${fileLikeAttachments.length} file attachment(s), but none looked like Excel (.xlsx).\n` +
-        `Details: ${describeActivityAttachments(activity)}`
-    );
   }
 
   // Bot Framework payload had no Excel. Try Graph (SharePoint/Teams file cards).

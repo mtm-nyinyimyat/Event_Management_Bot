@@ -900,6 +900,20 @@ export function loadWorkbookFromBuffer(buffer: Buffer, fileName?: string): Sheet
   return parseWorkbookBuffer(buffer, fileName);
 }
 
+/** Rebuild an .xlsx from parsed sheet rows (for re-sending the active event file). */
+export function sheetsToXlsxBuffer(sheets: SheetData[]): Buffer {
+  const workbook = XLSX.utils.book_new();
+  for (const sheet of sheets) {
+    const title = (sheet.sheet || "Sheet").slice(0, 31) || "Sheet";
+    const ws =
+      sheet.rows.length > 0
+        ? XLSX.utils.json_to_sheet(sheet.rows)
+        : XLSX.utils.aoa_to_sheet([]);
+    XLSX.utils.book_append_sheet(workbook, ws, title);
+  }
+  return Buffer.from(XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }));
+}
+
 function loadLocalWorkbook(): CachedWorkbook {
   const filePath = resolveExcelPath();
   if (!fs.existsSync(filePath)) {
@@ -991,8 +1005,15 @@ export async function loadWorkbook(
   }
 
   if (isEventSessionMode()) {
+    const ingest = (process.env.EVENTS_INGEST_MODE || "upload").trim().toLowerCase();
+    if (ingest === "sharepoint" || ingest === "url") {
+      throw new Error(
+        "No active event for this chat. Paste a SharePoint Excel URL, then send /start. " +
+          "After the event, send /end (or endevent) to clear the data."
+      );
+    }
     throw new Error(
-      "No active event for this chat. Paste a SharePoint Excel URL, then send /start (or startevent). " +
+      "No active event for this chat. Upload an .xlsx (paperclip → Upload from this device), then send /start. " +
         "After the event, send /end (or endevent) to clear the data."
     );
   }

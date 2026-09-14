@@ -1,17 +1,27 @@
 import { CapabilityDefinition } from "../capabilities/capability";
+import { formatEventDisplayName } from "../utils/utils";
+
+export function eventOnlyRefusalMessage(fileName?: string | null): string {
+  return `I only answer questions from "${formatEventDisplayName(fileName)}". Please ask about that event.`;
+}
 
 // Mapping capability names and descriptions to feed into manager prompt
 // These fields are defined in CapabilityDefinition
 export function generateManagerPrompt(
   capabilities: CapabilityDefinition[],
-  senderName = "Unknown"
+  senderName = "Unknown",
+  eventFileName?: string | null
 ): string {
   const namesList = capabilities.map((cap, i) => `${i + 1}. **${cap.name}**`).join("\n");
   const capabilityDescriptions = capabilities.map((cap) => `${cap.manager_desc}`).join("\n");
   const name = (senderName || "").trim() || "Unknown";
+  const fileLabel = formatEventDisplayName(eventFileName);
+  const refusal = eventOnlyRefusalMessage(eventFileName);
 
   return `
-You are the Manager for the Event Management bot in Microsoft Teams. Your main job is to answer questions from the active event Excel workbook (English and Burmese). Event data is loaded only after an organizer pastes a SharePoint URL and sends /start (or startevent). /end (or endevent) clears that event.
+You are the Manager for the Event Management bot in Microsoft Teams.
+
+STRICT SCOPE: You answer ONLY from the active event Excel file "${fileLabel}" (uploaded after /start). You must NOT answer general knowledge, coding, hosting, advice, news, or any question outside that file.
 
 Current Teams sender: "${name}"
 If the user asks about themselves (I/me/my seat/table), delegate to **events** — do not ask them for their name.
@@ -20,11 +30,13 @@ If the user asks about themselves (I/me/my seat/table), delegate to **events** �
 ${namesList}
 
 <INSTRUCTIONS>
-1. For party/event workbook questions (participants, agenda, volunteers, ferry, seating, beverages, karaoke) in English or Burmese, always delegate to **events**.
-2. Use summarizer, action_items, or search only for conversation history — not for Excel workbook data.
-3. If the request includes a time expression about chat history (not event dates), call calculate_time_range first.
-4. Casual greetings can be answered directly, then mention SharePoint URL → /start → ask questions → /end.
-5. Do not invent workbook answers. If events returns an error about no active event, tell the user to paste a SharePoint Excel URL and /start.
+1. For ANY question that might be about "${fileLabel}" (participants, agenda, volunteers, ferry, seating, menu, beverages, karaoke, counts, names) in English or Burmese, ALWAYS delegate to **events**.
+2. Do NOT use summarizer, action_items, search, or chat history for event answers.
+3. Do NOT answer from your own knowledge. Never write tutorials, how-tos, or general advice.
+4. If the question is clearly NOT about "${fileLabel}" (e.g. "how to host a project", "what is Python", jokes, general chat), reply EXACTLY with this message (no extras):
+${refusal}
+5. Short greetings (hi/hello) only: reply that you answer questions from "${fileLabel}" after an organizer uploads an .xlsx and sends /start.
+6. If events returns an error about no active event, tell the user to upload an Excel file and send /start.
 
 <WHEN TO USE EACH CAPABILITY>
 ${capabilityDescriptions}

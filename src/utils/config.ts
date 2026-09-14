@@ -34,25 +34,65 @@ export const DATABASE_CONFIG: DatabaseConfig = {
 };
 
 const XKIRO_OPENAI_BASE_URL = "https://api.xkiro.com/v1";
-const DEFAULT_MODEL = "qwen/qwen3.8-max:free";
+const DEFAULT_MODEL = "openai/gpt-oss-120b";
+
+function resolveBaseUrl(): string {
+  return (process.env.OPENAI_BASE_URL || "").trim() || XKIRO_OPENAI_BASE_URL;
+}
+
+function isGroqBaseUrl(baseUrl?: string): boolean {
+  return /api\.groq\.com/i.test(baseUrl || "");
+}
+
+function isDashScopeBaseUrl(baseUrl?: string): boolean {
+  return /dashscope|aliyuncs\.com/i.test(baseUrl || "");
+}
+
+function isXkiroBaseUrl(baseUrl?: string): boolean {
+  return /api\.xkiro\.com/i.test(baseUrl || "");
+}
 
 function resolveApiKey(): string {
-  const candidates = [
-    process.env.XKIRO_API_KEY,
-    process.env.OPENAI_API_KEY,
-    process.env.GROQ_API_KEY,
-    process.env.GEMINI_API_KEY,
-    process.env.GOOGLE_API_KEY,
-    process.env.AOAI_API_KEY,
-  ];
+  const baseUrl = resolveBaseUrl();
+  const groqMode = isGroqBaseUrl(baseUrl);
+  const dashScopeMode = isDashScopeBaseUrl(baseUrl);
+
+  const candidates = groqMode
+    ? [
+        process.env.GROQ_API_KEY,
+        process.env.OPENAI_API_KEY,
+      ]
+    : dashScopeMode
+      ? [
+          process.env.DASHSCOPE_API_KEY,
+          process.env.QWEN_API_KEY,
+          process.env.OPENAI_API_KEY,
+          process.env.XKIRO_API_KEY,
+        ]
+      : [
+          process.env.XKIRO_API_KEY,
+          process.env.OPENAI_API_KEY,
+          process.env.DASHSCOPE_API_KEY,
+          process.env.QWEN_API_KEY,
+          process.env.GROQ_API_KEY,
+          process.env.GEMINI_API_KEY,
+          process.env.GOOGLE_API_KEY,
+          process.env.AOAI_API_KEY,
+        ];
 
   for (const raw of candidates) {
     const key = (raw || "").trim();
     if (!key) {
       continue;
     }
-    // Do not send Groq keys to xKiro (or other non-Groq endpoints)
+    // Groq keys only against Groq; never send gsk_ to DashScope/xKiro
     if (key.startsWith("gsk_")) {
+      if (groqMode) {
+        return key;
+      }
+      continue;
+    }
+    if (groqMode) {
       continue;
     }
     return key;
@@ -278,7 +318,7 @@ function buildModelConfig(model: string): ModelConfig {
   return {
     model: process.env.OPENAI_MODEL || model,
     apiKey,
-    baseUrl: process.env.OPENAI_BASE_URL || XKIRO_OPENAI_BASE_URL,
+    baseUrl: resolveBaseUrl(),
   };
 }
 
@@ -312,17 +352,34 @@ export { getRagConfig, getEmbeddingConfig } from "../rag/config";
 
 export function validateEnvironment(logger: ILogger): void {
   if (!resolveApiKey()) {
+    const baseUrl = resolveBaseUrl();
+    if (isGroqBaseUrl(baseUrl)) {
+      throw new Error(
+        "Missing Groq API key. Set GROQ_API_KEY or OPENAI_API_KEY to a gsk_… key, with OPENAI_BASE_URL=https://api.groq.com/openai/v1"
+      );
+    }
+    if (isDashScopeBaseUrl(baseUrl)) {
+      throw new Error(
+        "Missing DashScope/Qwen API key. Set DASHSCOPE_API_KEY (or QWEN_API_KEY / OPENAI_API_KEY) with OPENAI_BASE_URL pointing to DashScope compatible-mode."
+      );
+    }
+    if (isXkiroBaseUrl(baseUrl)) {
+      throw new Error(
+        "Missing XKIRO_API_KEY (or OPENAI_API_KEY with sk-xt-…). Create a key at https://xkiro.com"
+      );
+    }
     throw new Error(
-      "Missing XKIRO_API_KEY (or OPENAI_API_KEY with sk-xt-…). Create a key at https://xkiro.com"
+      "Missing API key. Set OPENAI_API_KEY (or DASHSCOPE_API_KEY / XKIRO_API_KEY / GROQ_API_KEY) for your OPENAI_BASE_URL provider."
     );
   }
 
   const sessionMode = !["0", "false", "no", "off"].includes(
     (process.env.EVENTS_SESSION_MODE || "1").trim().toLowerCase()
   );
+  const ingestMode = (process.env.EVENTS_INGEST_MODE || "upload").trim().toLowerCase();
   if (sessionMode) {
     logger.debug(
-      "📄 Excel source: SharePoint URL session mode (paste URL → /start → Q&A → /end). Set EVENTS_SESSION_MODE=0 for local/graph fallback."
+      `📄 Excel source: session mode via ${ingestMode === "sharepoint" || ingestMode === "url" ? "SharePoint URL" : "chat file upload"} (EVENTS_INGEST_MODE=${ingestMode || "upload"})`
     );
   } else if (getEventsSource() === "graph") {
     assertGraphExcelConfig();

@@ -8,6 +8,10 @@ import { IDatabase } from "../storage/database";
 export interface MessageContext {
   text: string;
   conversationId: string;
+  /** When set, workbook/RAG lookups use this conversation's active event (shared across DM/group). */
+  activeEventConversationId?: string;
+  /** Display name of the active event Excel file (for user-facing refusals). */
+  activeEventFileName?: string;
   userId?: string;
   userName: string;
   timestamp: string;

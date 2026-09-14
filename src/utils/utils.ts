@@ -5,6 +5,29 @@ import { MessageRecord } from "../storage/types";
 import { MessageContext } from "./messageContext";
 
 /**
+ * User-facing event title from an Excel file name.
+ * "2025 MTM Annual Staff Party 3.xlsx" → "2025 MTM Annual Staff Party"
+ */
+export function formatEventDisplayName(
+  fileName?: string | null,
+  fallback = "the active event"
+): string {
+  let name = String(fileName || "").trim();
+  if (!name) {
+    return fallback;
+  }
+
+  name = name.replace(/\.(xlsx|xls)$/i, "").trim();
+  // Drop trailing copy/version markers: " 3", " (3)", "_v2", " - copy"
+  name = name
+    .replace(/\s*[\(\[]?\s*v?\d+\s*[\)\]]?\s*$/i, "")
+    .replace(/\s*[-_]\s*(copy|final|new)\s*$/i, "")
+    .trim();
+
+  return name || fallback;
+}
+
+/**
  * Helper function to finalize and send a prompt response with citations
  */
 export function finalizePromptResponse(

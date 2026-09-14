@@ -11,9 +11,11 @@ import {
   type CachedWorkbook,
   type SheetData,
 } from "./excelStore";
+import { clearActiveEventExport, setActiveEventExport } from "./activeEventFile";
 import { downloadExcelBinaryFromShareUrl } from "./graphExcelClient";
 
 export type EventSessionStatus = "idle" | "pending" | "active";
+export type EventIngestMode = "upload" | "sharepoint";
 
 export interface EventSession {
   conversationId: string;
@@ -26,7 +28,29 @@ export interface EventSession {
   updatedAt: string;
 }
 
+export interface PendingUploadFile {
+  fileName: string;
+  buffer: Buffer;
+  uploadedAt: number;
+}
+
+/** In-memory staged Excel uploads (permission-free testing). Cleared on /end. */
+const pendingUploads = new Map<string, PendingUploadFile[]>();
+
 let schemaReady: Promise<void> | null = null;
+
+/**
+ * Testing default: chat file uploads.
+ * Set EVENTS_INGEST_MODE=sharepoint later to re-enable SharePoint URL flow.
+ */
+export function getEventIngestMode(): EventIngestMode {
+  const raw = (process.env.EVENTS_INGEST_MODE || "upload").trim().toLowerCase();
+  return raw === "sharepoint" || raw === "url" ? "sharepoint" : "upload";
+}
+
+export function isUploadIngestMode(): boolean {
+  return getEventIngestMode() === "upload";
+}
 
 async function ensureSchema(): Promise<void> {
   if (!schemaReady) {
@@ -62,8 +86,6 @@ export function isStartEventCommand(text: string): boolean {
   const t = normalizeCommandText(text);
   return (
     t === "/start" ||
-    t === "/startevent" ||
-    t === "startevent" ||
     t === "start event"
   );
 }
@@ -145,6 +167,77 @@ export async function getEventSession(conversationId: string): Promise<EventSess
   return mapRow(result.rows[0]);
 }
 
+/** Active event from any chat (DM and group share one started event). */
+export async function findActiveEventSession(): Promise<EventSession | null> {
+  await ensureSchema();
+  const result = await getPostgresPool().query(
+    `SELECT conversation_id, status, pending_urls, active_source, active_file_name,
+            started_by, started_at, updated_at
+     FROM event_sessions
+     WHERE status = 'active'
+     ORDER BY started_at DESC NULLS LAST
+     LIMIT 1`
+  );
+  if (!result.rows[0]) {
+    return null;
+  }
+  return mapRow(result.rows[0]);
+}
+
+export async function isAnyEventActive(): Promise<boolean> {
+  return Boolean(await findActiveEventSession());
+}
+
+export function getPendingUploads(conversationId: string): PendingUploadFile[] {
+  return [...(pendingUploads.get(conversationId) || [])];
+}
+
+export function clearPendingUploads(conversationId: string): void {
+  pendingUploads.delete(conversationId);
+}
+
+/**
+ * Stage Excel file bytes from a chat upload. Not indexed until /start.
+ */
+export async function addPendingUploads(
+  conversationId: string,
+  files: Array<{ fileName: string; buffer: Buffer }>
+): Promise<{ session: EventSession; pendingCount: number; fileNames: string[] }> {
+  await ensureSchema();
+  const existing = pendingUploads.get(conversationId) || [];
+  const added: PendingUploadFile[] = files.map((file) => ({
+    fileName: file.fileName,
+    buffer: file.buffer,
+    uploadedAt: Date.now(),
+  }));
+  const merged = [...existing, ...added];
+  pendingUploads.set(conversationId, merged);
+
+  const markers = merged.map((file) => `chat-upload://${file.fileName}`);
+  const current = await getEventSession(conversationId);
+  const status: EventSessionStatus = current.status === "active" ? "active" : "pending";
+
+  await getPostgresPool().query(
+    `INSERT INTO event_sessions (conversation_id, status, pending_urls, updated_at)
+     VALUES ($1, $2, $3::jsonb, NOW())
+     ON CONFLICT (conversation_id) DO UPDATE SET
+       status = CASE
+         WHEN event_sessions.status = 'active' THEN 'active'
+         ELSE 'pending'
+       END,
+       pending_urls = $3::jsonb,
+       updated_at = NOW()`,
+    [conversationId, status, JSON.stringify(markers)]
+  );
+
+  return {
+    session: await getEventSession(conversationId),
+    pendingCount: merged.length,
+    fileNames: added.map((file) => file.fileName),
+  };
+}
+
+/** @deprecated Prefer upload mode for testing. Kept for SharePoint URL flow. */
 export async function addPendingShareUrls(
   conversationId: string,
   urls: string[]
@@ -170,6 +263,38 @@ export async function addPendingShareUrls(
   return getEventSession(conversationId);
 }
 
+function workbookFromUploadBuffers(
+  files: PendingUploadFile[]
+): { workbook: CachedWorkbook; fileNames: string[] } {
+  const allSheets: SheetData[] = [];
+  const fileNames: string[] = [];
+
+  for (const file of files) {
+    const sheets = loadWorkbookFromBuffer(file.buffer, file.fileName);
+    fileNames.push(file.fileName);
+    allSheets.push(...sheets);
+  }
+
+  if (!fileNames.length) {
+    throw new Error("No Excel upload buffers available to start the event.");
+  }
+
+  return {
+    fileNames,
+    workbook: {
+      source: `chat-upload://${fileNames.join(" | ")}`,
+      sourceType: "upload",
+      fileName: fileNames.join(", "),
+      sheets: allSheets,
+      loadedAt: Date.now(),
+    },
+  };
+}
+
+/**
+ * SharePoint URL download path — used when EVENTS_INGEST_MODE=sharepoint.
+ * Left intact for later; not used in upload test mode.
+ */
 async function downloadAndMergeWorkbooks(
   urls: string[],
   logger?: ILogger
@@ -210,38 +335,16 @@ async function downloadAndMergeWorkbooks(
   };
 }
 
-/**
- * /start — download pending SharePoint URLs, activate workbook for this conversation, index RAG.
- */
-export async function startEventSession(options: {
+async function activateWorkbook(options: {
   conversationId: string;
   startedBy: string;
-  logger?: ILogger;
+  workbook: CachedWorkbook;
+  fileNames: string[];
+  exportBuffer?: Buffer;
 }): Promise<string> {
-  const { conversationId, startedBy, logger } = options;
-  const session = await getEventSession(conversationId);
-
-  if (!session.pendingUrls.length && session.status !== "active") {
-    return (
-      "No SharePoint Excel URL is pending.\n" +
-      "1) Paste a SharePoint/OneDrive Excel link\n" +
-      "2) Send /start (or startevent) to process it"
-    );
-  }
-
-  const urls =
-    session.pendingUrls.length > 0
-      ? session.pendingUrls
-      : session.activeSource
-        ? session.activeSource.split(" | ").map((part) => part.trim()).filter(Boolean)
-        : [];
-
-  if (!urls.length) {
-    return "No SharePoint URL available to start. Paste a link first, then send /start.";
-  }
-
-  const { workbook, files } = await downloadAndMergeWorkbooks(urls, logger);
+  const { conversationId, startedBy, workbook, fileNames, exportBuffer } = options;
   setConversationWorkbook(conversationId, workbook);
+  setActiveEventExport({ workbook, conversationId, originalBuffer: exportBuffer });
 
   await ensureWorkbookIndexed(
     workbook.sheets,
@@ -250,6 +353,7 @@ export async function startEventSession(options: {
   );
 
   clearQueryCaches();
+  clearPendingUploads(conversationId);
 
   await getPostgresPool().query(
     `INSERT INTO event_sessions (
@@ -264,10 +368,10 @@ export async function startEventSession(options: {
        started_by = EXCLUDED.started_by,
        started_at = NOW(),
        updated_at = NOW()`,
-    [conversationId, workbook.source, workbook.fileName || files.join(", "), startedBy]
+    [conversationId, workbook.source, workbook.fileName || fileNames.join(", "), startedBy]
   );
 
-  const details = files.map((name) => `• ${name}`).join("\n");
+  const details = fileNames.map((name) => `• ${name}`).join("\n");
   return (
     `Event started.\nLoaded:\n${details}\n\n` +
     `I will answer questions from this workbook until someone sends /end (or endevent).`
@@ -275,35 +379,116 @@ export async function startEventSession(options: {
 }
 
 /**
- * /end — clear active workbook, RAG vectors, query caches, and session row for this conversation.
+ * /start — activate pending Excel (chat uploads in test mode, or SharePoint URLs later).
+ */
+export async function startEventSession(options: {
+  conversationId: string;
+  startedBy: string;
+  logger?: ILogger;
+}): Promise<string> {
+  const { conversationId, startedBy, logger } = options;
+  const mode = getEventIngestMode();
+  const session = await getEventSession(conversationId);
+
+  const existingActive = await findActiveEventSession();
+  if (existingActive && existingActive.conversationId !== conversationId) {
+    return (
+      "A previous event is still in progress in another chat and has not been ended yet.\n" +
+      "Send /end (or endevent) there (or here) to finish it before starting another event."
+    );
+  }
+
+  // --- Upload test mode (default) ---
+  if (mode === "upload") {
+    const uploads = getPendingUploads(conversationId);
+    if (!uploads.length) {
+      return (
+        "No Excel upload is pending.\n" +
+        "1) Upload an .xlsx via paperclip → Upload from this device\n" +
+        "2) Send /start to process it\n\n" +
+        "(SharePoint URL mode is disabled for testing. Set EVENTS_INGEST_MODE=sharepoint later.)"
+      );
+    }
+
+    logger?.debug(`📎 Starting event from ${uploads.length} pending chat upload(s)`);
+    const { workbook, fileNames } = workbookFromUploadBuffers(uploads);
+    const exportBuffer =
+      uploads.length === 1 ? uploads[0].buffer : undefined;
+    return activateWorkbook({ conversationId, startedBy, workbook, fileNames, exportBuffer });
+  }
+
+  // --- SharePoint URL mode (kept for later; enable with EVENTS_INGEST_MODE=sharepoint) ---
+  if (!session.pendingUrls.length && session.status !== "active") {
+    return (
+      "No SharePoint Excel URL is pending.\n" +
+      "1) Paste a SharePoint/OneDrive Excel link\n" +
+      "2) Send /start to process it"
+    );
+  }
+
+  const urls =
+    session.pendingUrls.length > 0
+      ? session.pendingUrls.filter((item) => /^https?:\/\//i.test(item))
+      : session.activeSource
+        ? session.activeSource.split(" | ").map((part) => part.trim()).filter(Boolean)
+        : [];
+
+  if (!urls.length) {
+    return "No SharePoint URL available to start. Paste a link first, then send /start.";
+  }
+
+  const { workbook, files } = await downloadAndMergeWorkbooks(urls, logger);
+  return activateWorkbook({ conversationId, startedBy, workbook, fileNames: files });
+}
+
+/**
+ * /end — clear active workbook, RAG vectors, query caches, pending uploads/URLs.
+ * Works from DM or group: clears the currently active event wherever it was started.
  */
 export async function endEventSession(options: {
   conversationId: string;
   logger?: ILogger;
 }): Promise<string> {
   const { conversationId, logger } = options;
-  const session = await getEventSession(conversationId);
+  const localSession = await getEventSession(conversationId);
+  const active = await findActiveEventSession();
+  const targetId = active?.conversationId || conversationId;
+  const session = active || localSession;
+  const hadUploads =
+    getPendingUploads(conversationId).length > 0 || getPendingUploads(targetId).length > 0;
 
+  clearPendingUploads(conversationId);
+  clearPendingUploads(targetId);
+  clearActiveEventExport();
   clearConversationWorkbook(conversationId);
+  clearConversationWorkbook(targetId);
   clearWorkbookCache();
   clearQueryCaches();
-  await clearRagIndexAsync({ persist: true, conversationId });
+  await clearRagIndexAsync({ persist: true, conversationId: targetId });
+  if (targetId !== conversationId) {
+    await clearRagIndexAsync({ persist: true, conversationId });
+  }
 
   await ensureSchema();
-  await getPostgresPool().query(`DELETE FROM event_sessions WHERE conversation_id = $1`, [
-    conversationId,
-  ]);
+  await getPostgresPool().query(
+    `DELETE FROM event_sessions WHERE conversation_id = $1 OR status = 'active'`,
+    [targetId]
+  );
 
-  logger?.debug(`🧹 Event session ended for ${conversationId}`);
+  logger?.debug(`🧹 Event session ended for ${targetId} (requested from ${conversationId})`);
 
-  if (session.status === "idle" && !session.pendingUrls.length) {
-    return "No active event to end. Paste a SharePoint URL and send /start when ready.";
+  if (session.status === "idle" && !session.pendingUrls.length && !hadUploads) {
+    return isUploadIngestMode()
+      ? "No active event to end. Upload an .xlsx and send /start when ready."
+      : "No active event to end. Paste a SharePoint URL and send /start when ready.";
   }
 
   return (
     "Event ended.\n" +
-    "Cleared workbook cache, RAG vectors, answer cache, and pending SharePoint URLs for this chat.\n" +
-    "Paste a new SharePoint link and send /start to begin another event."
+    "Cleared workbook cache, RAG vectors, answer cache, and pending event files.\n" +
+    (isUploadIngestMode()
+      ? "Upload a new .xlsx and send /start to begin another event."
+      : "Paste a new SharePoint link and send /start to begin another event.")
   );
 }
 
@@ -313,8 +498,8 @@ export async function requireActiveEvent(conversationId: string): Promise<EventS
 }
 
 /**
- * If Postgres says the event is active but memory was cleared (process restart),
- * re-download from the saved SharePoint source URL(s).
+ * Rehydrate after process restart when possible.
+ * SharePoint URL sessions can re-download; chat-upload sessions cannot (buffers are in-memory only).
  */
 export async function ensureActiveWorkbookInMemory(
   conversationId: string,
@@ -330,6 +515,15 @@ export async function ensureActiveWorkbookInMemory(
     return null;
   }
 
+  // Upload-mode sources cannot be rehydrated after restart
+  if (session.activeSource.startsWith("chat-upload://")) {
+    logger?.warn(
+      `Active upload workbook for ${conversationId} was lost after restart. Re-upload and /start again.`
+    );
+    return null;
+  }
+
+  // SharePoint rehydrate (EVENTS_INGEST_MODE=sharepoint)
   const urls = session.activeSource
     .split(" | ")
     .map((part) => part.trim())
