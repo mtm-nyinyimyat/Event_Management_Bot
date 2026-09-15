@@ -61,7 +61,9 @@ export class EventsCapability extends BaseCapability {
 
       const response = await prompt.send(message);
       return {
-        response: response.content || "No response generated",
+        response:
+          response.content ||
+          "Couldn't find that one — try asking another way?",
       };
     } catch (error) {
       throw new ServiceUnavailableError(error);
@@ -79,6 +81,6 @@ export const EVENTS_CAPABILITY_DEFINITION: CapabilityDefinition = {
       logger.error(`❌ Error in Events Capability: ${result.error}`);
       throw new ServiceUnavailableError(result.error);
     }
-    return result.response || "No matching rows were found in the Excel file.";
+    return result.response || "Couldn't find that one — try asking another way?";
   },
 };

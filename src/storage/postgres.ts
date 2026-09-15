@@ -8,23 +8,8 @@ export function isPostgresConfigured(): boolean {
   );
 }
 
-export function resolveDatabaseType(): "postgres" | "mssql" {
-  const explicit = (process.env.DB_TYPE || process.env.DATABASE_TYPE || "").trim().toLowerCase();
-  if (explicit === "mssql" || explicit === "sqlserver") {
-    return "mssql";
-  }
-  if (
-    explicit === "postgres" ||
-    explicit === "postgresql" ||
-    explicit === "pg" ||
-    isPostgresConfigured()
-  ) {
-    return "postgres";
-  }
-  if (process.env.RUNNING_ON_AZURE === "1" || process.env.SQL_CONNECTION_STRING) {
-    return "mssql";
-  }
-  // Default for this project is Postgres
+export function resolveDatabaseType(): "postgres" {
+  // Event bot + RAG require Postgres (pgvector).
   return "postgres";
 }
 

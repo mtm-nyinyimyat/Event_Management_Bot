@@ -1,4 +1,4 @@
-import { CitationAppearance, Client, IMessageActivity } from "@microsoft/teams.api";
+import { Client, IMessageActivity } from "@microsoft/teams.api";
 import { ConversationMemory } from "../storage/conversationMemory";
 import { IDatabase } from "../storage/database";
 
@@ -17,11 +17,8 @@ export interface MessageContext {
   timestamp: string;
   isPersonalChat: boolean;
   activityId: string;
-  members: Array<{ name: string; id: string }>; // Available conversation members
-  memory: ConversationMemory; // get convo memory by agent type
-  startTime: string;
-  endTime: string;
-  citations: CitationAppearance[];
+  members: Array<{ name: string; id: string }>;
+  memory: ConversationMemory;
 }
 
 async function getConversationParticipantsFromAPI(
@@ -30,17 +27,14 @@ async function getConversationParticipantsFromAPI(
 ): Promise<Array<{ name: string; id: string }>> {
   try {
     const members = await api.conversations.members(conversationId).get();
-
-    if (Array.isArray(members)) {
-      const participants = members.map((member) => ({
-        name: member.name || "Unknown",
-        id: member.aadObjectId || member.id,
-      }));
-      return participants;
-    } else {
+    if (!Array.isArray(members)) {
       return [];
     }
-  } catch (error) {
+    return members.map((member) => ({
+      name: member.name || "Unknown",
+      id: member.aadObjectId || member.id,
+    }));
+  } catch {
     return [];
   }
 }
@@ -53,43 +47,22 @@ export async function createMessageContext(
   activity: IMessageActivity,
   api?: Client
 ): Promise<MessageContext> {
-  const text = activity.text || "";
   const conversationId = `${activity.conversation.id}`;
-  // Prefer AAD object id so the same person matches across personal/group/channel chats.
   const userId = activity.from.aadObjectId || activity.from.id;
-  const userName = activity.from.name || "User";
-  const timestamp = activity.timestamp?.toString() || "Unknown";
-  const isPersonalChat = activity.conversation.conversationType === "personal";
-  const activityId = activity.id;
-
-  // Fetch members for group conversations
   let members: Array<{ name: string; id: string }> = [];
   if (api) {
     members = await getConversationParticipantsFromAPI(api, conversationId);
   }
 
-  const memory = new ConversationMemory(storage, conversationId);
-
-  const now = new Date();
-
-  const startTime = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
-  const endTime = now.toISOString();
-  const citations: CitationAppearance[] = [];
-
-  const context: MessageContext = {
-    text,
+  return {
+    text: activity.text || "",
     conversationId,
     userId,
-    userName,
-    timestamp,
-    isPersonalChat,
-    activityId,
+    userName: activity.from.name || "User",
+    timestamp: activity.timestamp?.toString() || "Unknown",
+    isPersonalChat: activity.conversation.conversationType === "personal",
+    activityId: activity.id,
     members,
-    memory,
-    startTime,
-    endTime,
-    citations,
+    memory: new ConversationMemory(storage, conversationId),
   };
-
-  return context;
 }

@@ -151,7 +151,7 @@ async function replyFromManager(
   try {
     const manager = new ManagerPrompt(context, log.child("manager"));
     const result = await manager.processRequest();
-    const formattedResult = finalizePromptResponse(result.response, context, log);
+    const formattedResult = finalizePromptResponse(result.response);
     const sent = await send(formattedResult);
     if (sent.id) {
       formattedResult.id = sent.id;
@@ -195,17 +195,17 @@ app.on("message", async ({ send, activity, api }) => {
         const eventLabel = formatEventDisplayName(active?.activeFileName, "");
         const ack = active
           ? eventLabel
-            ? `Got it! Ask me anything about "${eventLabel}" (seating, ferry, menu, beverage, etc.).`
-            : "Got it! Ask me anything about the event (seating, ferry, menu, beverage, etc.)."
-          : "Got it! Upload an .xlsx and send /start when you are ready.";
+            ? `Nice 🙂 What do you need for "${eventLabel}"?`
+            : "Nice 🙂 What do you need for the event?"
+          : "Nice 🙂 Upload an .xlsx and hit /start when you're ready.";
         const sent = await send(ack);
         trackedMessages = createMessageRecords([activity]);
         logger.debug(`Ignored emoticon-only message; replied id=${sent.id}`);
       } else if (isStartEventCommand(text)) {
         if (await isAnyEventActive()) {
           const confirmation =
-            "A previous event is still in progress and has not been ended yet.\n" +
-            "Send /end (or endevent) to finish it before starting another event.";
+            "There's already an event running.\n" +
+            "Send /end first if you want to start a new one.";
           const sent = await send(confirmation);
           trackedMessages = createMessageRecords([activity]);
           logger.debug(`Blocked /start while event active; replied id=${sent.id}`);
@@ -236,16 +236,15 @@ app.on("message", async ({ send, activity, api }) => {
             ? await downloadExcelFilesFromActivity(
                 activity,
                 conversationId,
-                logger.child("excel-upload"),
-                { allowGraphFallback: false }
+                logger.child("excel-upload")
               )
             : null;
 
           if (downloaded && downloaded.length > 0) {
             if (await isAnyEventActive()) {
               const confirmation =
-                "A previous event is still in progress and has not been ended yet.\n" +
-                "Send /end (or endevent) to finish it before uploading a new Excel file.";
+                "There's already an event running.\n" +
+                "Send /end first if you want to upload a new Excel.";
               const sent = await send(confirmation);
               trackedMessages = createMessageRecords([activity]);
               logger.debug(`Blocked upload while event active; replied id=${sent.id}`);
@@ -253,10 +252,9 @@ app.on("message", async ({ send, activity, api }) => {
               const staged = await addPendingUploads(conversationId, downloaded);
               const list = staged.fileNames.map((name) => `• ${name}`).join("\n");
               const confirmation =
-                `Saved ${staged.fileNames.length} Excel upload(s) for this chat:\n${list}\n\n` +
-                `Pending file(s): ${staged.pendingCount}\n` +
-                `I will not process them until you send /start\n` +
-                `When the event is over, send /end to clear all event data.`;
+                `Got your Excel 🙂\n${list}\n\n` +
+                `Send /start when you want me to load it.\n` +
+                `Send /end later to clear everything.`;
               const sent = await send(confirmation);
               trackedMessages = createMessageRecords([activity]);
               logger.debug(`Pending Excel upload(s) saved; replied id=${sent.id}`);
@@ -281,18 +279,17 @@ app.on("message", async ({ send, activity, api }) => {
         if (shareUrls.length > 0 && textWithoutUrls.length < 8) {
           if (await isAnyEventActive()) {
             const confirmation =
-              "A previous event is still in progress and has not been ended yet.\n" +
-              "Send /end (or endevent) to finish it before pasting a new SharePoint URL.";
+              "There's already an event running.\n" +
+              "Send /end first if you want to paste a new link.";
             const sent = await send(confirmation);
             trackedMessages = createMessageRecords([activity]);
             logger.debug(`Blocked SharePoint URL while event active; replied id=${sent.id}`);
           } else {
             const session = await addPendingShareUrls(conversationId, shareUrls);
             const confirmation =
-              `Saved ${shareUrls.length} SharePoint link(s) for this chat.\n` +
-              `Pending URL(s): ${session.pendingUrls.length}\n\n` +
-              `I will not process the workbook until you send /start.\n` +
-              `When the event is over, send /end or endevent to clear all event data.`;
+              `Got your SharePoint link 🙂 (${session.pendingUrls.length} pending)\n\n` +
+              `Send /start when you want me to load it.\n` +
+              `Send /end later to clear everything.`;
             const sent = await send(confirmation);
             trackedMessages = createMessageRecords([activity]);
             logger.debug(`Pending SharePoint URL(s) saved; replied id=${sent.id}`);
@@ -341,7 +338,7 @@ app.on("file.consent.accept", async ({ activity, send }) => {
     });
 
     if (!uploaded) {
-      await send("Service unavailable this time. The event workbook is no longer available.");
+      await send("Looks like that Excel isn't available anymore — sorry about that.");
       return { status: 200 };
     }
 
@@ -359,7 +356,7 @@ app.on("file.consent.accept", async ({ activity, send }) => {
   } catch (error) {
     logger.error(`file.consent.accept failed: ${describeNetworkError(error)}`);
     try {
-      await send("Service unavailable this time. Please try again shortly.");
+      await send("Sorry, I'm a bit stuck right now. Try again in a moment?");
     } catch {
       // ignore
     }
@@ -369,7 +366,7 @@ app.on("file.consent.accept", async ({ activity, send }) => {
 
 app.on("file.consent.decline", async ({ send }) => {
   try {
-    await send("Okay — I won’t send the Excel file.");
+    await send("No worries — I won't send the file.");
   } catch (error) {
     logger.warn(`file.consent.decline reply failed: ${describeNetworkError(error)}`);
   }
@@ -380,19 +377,19 @@ app.on("install.add", async ({ send }) => {
   try {
     if (isUploadIngestMode()) {
       await send(
-        "👋 Hi! I'm the Event Management bot (upload test mode).\n\n" +
+        "Hey! Happy to help with the event once we're set up.\n\n" +
           "1) Upload an .xlsx (paperclip → Upload from this device)\n" +
-          "2) Send /start to load it\n" +
-          "3) Ask questions about the event (@mention me in groups)\n" +
-          "4) Send /end when finished to clear the data"
+          "2) Send /start\n" +
+          "3) Just chat with me about seating, ferry, menu, drinks… (@mention in groups)\n" +
+          "4) Send /end when you're done"
       );
     } else {
       await send(
-        "👋 Hi! I'm the Event Management bot.\n\n" +
+        "Hey! Happy to help with the event once we're set up.\n\n" +
           "1) Paste a SharePoint Excel URL\n" +
-          "2) Send /start to load it\n" +
-          "3) Ask questions about the event\n" +
-          "4) Send /end when finished to clear the data"
+          "2) Send /start\n" +
+          "3) Just chat with me about the event\n" +
+          "4) Send /end when you're done"
       );
     }
   } catch (error) {

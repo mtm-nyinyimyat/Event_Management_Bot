@@ -16,7 +16,7 @@ export interface ModelConfig {
 }
 
 export interface DatabaseConfig {
-  type: "mssql" | "postgres";
+  type: "postgres";
   connectionString?: string;
   server?: string;
   database?: string;
@@ -402,17 +402,6 @@ export function validateEnvironment(logger: ILogger): void {
     logger.debug(
       `✅ Postgres configuration validated (${process.env.PGDATABASE || "DATABASE_URL"})`
     );
-  }
-
-  if (DATABASE_CONFIG.type === "mssql") {
-    const sqlRequiredVars = ["SQL_CONNECTION_STRING"];
-    const sqlMissing = sqlRequiredVars.filter((envVar) => !process.env[envVar]);
-    if (sqlMissing.length > 0) {
-      throw new Error(
-        `SQL Server configuration incomplete. Missing: ${sqlMissing.join(", ")}`
-      );
-    }
-    logger.debug("✅ SQL Server configuration validated");
   }
 
   logger.debug(`📦 Using database: ${DATABASE_CONFIG.type}`);

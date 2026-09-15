@@ -117,20 +117,6 @@ export function resolveUploadedWorkbook(
   return sharedUploadedWorkbook || undefined;
 }
 
-export function setUploadedWorkbook(
-  workbook: CachedWorkbook,
-  options?: { conversationId?: string; userId?: string }
-): void {
-  sharedUploadedWorkbook = workbook;
-  persistSharedUpload(workbook);
-  if (options?.conversationId) {
-    conversationWorkbooks.set(options.conversationId, workbook);
-  }
-  if (options?.userId) {
-    userWorkbooks.set(options.userId, workbook);
-  }
-}
-
 export function setConversationWorkbook(conversationId: string, workbook: CachedWorkbook): void {
   conversationWorkbooks.set(conversationId, workbook);
   sharedUploadedWorkbook = workbook;
@@ -1049,18 +1035,6 @@ export async function loadWorkbook(
   return workbookCache.sheets;
 }
 
-export async function loadEvents(
-  conversationIdOrOptions?: string | WorkbookLookupOptions
-): Promise<EventRecord[]> {
-  const sheets = await loadWorkbook(false, conversationIdOrOptions);
-  return sheets.flatMap((sheet) =>
-    sheet.rows.map((row) => ({
-      Sheet: sheet.sheet,
-      ...row,
-    }))
-  );
-}
-
 function normalizeText(value: string): string {
   return value.toLocaleLowerCase("my").normalize("NFC");
 }
@@ -1529,21 +1503,6 @@ function answerHintForQuery(query: string, sheets: SheetData[]): string | undefi
   }
 
   return undefined;
-}
-
-export async function searchEvents(
-  query: string,
-  maxResults = DEFAULT_MAX_RESULTS,
-  conversationIdOrOptions?: string | WorkbookLookupOptions
-): Promise<EventRecord[]> {
-  const events = await loadEvents(conversationIdOrOptions);
-  const matches = !query.trim()
-    ? events
-    : events.filter((event) =>
-        matchesQuery([...Object.keys(event), ...Object.values(event)].join(" "), query)
-      );
-
-  return matches.slice(0, resultLimit(maxResults)).map(compactRow);
 }
 
 export async function searchWorkbook(

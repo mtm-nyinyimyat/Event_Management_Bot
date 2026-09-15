@@ -12,10 +12,10 @@ const FILE_CONSENT_CARD = "application/vnd.microsoft.teams.card.file.consent";
 const FILE_INFO_CARD = "application/vnd.microsoft.teams.card.file.info";
 
 export const SERVICE_UNAVAILABLE_TEXT =
-  "Service unavailable this time. Please view the Excel file below.\n\nTap Accept on the file card to save the workbook.";
+  "Sorry, I'm a bit stuck right now — tap Accept below if you want the Excel file.";
 
 const SERVICE_UNAVAILABLE_NO_FILE_TEXT =
-  "Service unavailable this time. Please try again shortly.";
+  "Sorry, I'm a bit stuck right now. Try again in a moment?";
 
 interface ActiveEventExport {
   buffer: Buffer;

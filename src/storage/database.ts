@@ -1,33 +1,14 @@
 import { MessageRecord } from "./types";
 
 /**
- * Abstract database interface for Postgres and MSSQL implementations
+ * Abstract database interface for conversation history (Postgres).
  */
 export interface IDatabase {
   initialize(): Promise<void>;
-  clearAll(): void | Promise<void>;
   get(conversationId: string): MessageRecord[] | Promise<MessageRecord[]>;
-  getMessagesByTimeRange(
-    conversationId: string,
-    startTime: string,
-    endTime: string
-  ): MessageRecord[] | Promise<MessageRecord[]>;
-  getRecentMessages(
-    conversationId: string,
-    limit?: number
-  ): MessageRecord[] | Promise<MessageRecord[]>;
   clearConversation(conversationId: string): void | Promise<void>;
   addMessages(messages: MessageRecord[]): void | Promise<void>;
   countMessages(conversationId: string): number | Promise<number>;
-  clearAllMessages(): void | Promise<void>;
-  getFilteredMessages(
-    conversationId: string,
-    keywords: string[],
-    startTime: string,
-    endTime: string,
-    participants?: string[],
-    maxResults?: number
-  ): MessageRecord[] | Promise<MessageRecord[]>;
   recordFeedback(
     replyToId: string,
     reaction: "like" | "dislike" | string,

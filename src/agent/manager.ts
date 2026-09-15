@@ -1,33 +1,29 @@
-import { ChatPrompt } from "@microsoft/teams.ai";
 import { ILogger } from "@microsoft/teams.common";
 import { EVENTS_CAPABILITY_DEFINITION } from "../capabilities/events/events";
-import { CAPABILITY_DEFINITIONS } from "../capabilities/registry";
-import { getEventSession, findActiveEventSession } from "../events/eventSession";
-import { createChatModel, getModelConfig } from "../utils/config";
+import { ServiceUnavailableError } from "../events/activeEventFile";
+import { findActiveEventSession, getEventSession } from "../events/eventSession";
 import { MessageContext } from "../utils/messageContext";
 import { answerCache, normalizeCacheQuery } from "../utils/queryCache";
-import { extractTimeRange, formatEventDisplayName } from "../utils/utils";
-import { ServiceUnavailableError } from "../events/activeEventFile";
-import { generateManagerPrompt } from "./prompt";
+import { formatEventDisplayName } from "../utils/utils";
 
 export interface ManagerResult {
   response: string;
 }
 
 function eventOnlyRefusal(fileName?: string | null): string {
-  return `I only answer questions from "${formatEventDisplayName(fileName)}". Please ask about that event.`;
+  return `I mostly just know about "${formatEventDisplayName(fileName)}" — what were you wondering about for that?`;
 }
 
 function noActiveEventMsg(): string {
-  return "I only answer questions from the active event. Upload an .xlsx and send /start first.";
+  return "We're not live yet — upload an .xlsx and send /start whenever you're ready.";
 }
 
 function activeEventGreeting(fileName?: string | null): string {
-  return `Hi! Ask me anything about "${formatEventDisplayName(fileName)}"`;
+  return `Hey — what's up? Anything you need for "${formatEventDisplayName(fileName)}"?`;
 }
 
 function activeEventPrompt(fileName?: string | null): string {
-  return `Ask me anything about "${formatEventDisplayName(fileName)}"`;
+  return `What's on your mind for "${formatEventDisplayName(fileName)}"?`;
 }
 
 function isGreeting(text: string): boolean {
@@ -50,96 +46,12 @@ function looksLikeOffTopic(text: string): boolean {
   return offTopic && !eventHints;
 }
 
-// Manager prompt that coordinates all sub-tasks
+/** Routes event workbook questions to the events capability (no general LLM manager). */
 export class ManagerPrompt {
-  private prompt: ChatPrompt;
-
-  private isInitialized = false;
-
   constructor(
     private context: MessageContext,
     private logger: ILogger
   ) {}
-
-  private async createManagerPrompt(): Promise<ChatPrompt> {
-    const managerModelConfig = getModelConfig("manager");
-    this.logger.debug(
-      `🤖 Manager model=${managerModelConfig.model} baseUrl=${managerModelConfig.baseUrl}`
-    );
-
-    const historyLimit = Math.max(2, Number(process.env.MANAGER_HISTORY_LIMIT || 6) || 6);
-    const history = await this.context.memory.values();
-    const recentHistory = history.slice(-historyLimit).map((msg) => ({
-      role: msg.role,
-      content: msg.content,
-    }));
-
-    const prompt = new ChatPrompt({
-      instructions: generateManagerPrompt(
-        CAPABILITY_DEFINITIONS,
-        this.context.userName,
-        this.context.activeEventFileName
-      ),
-      model: createChatModel(managerModelConfig),
-      messages: recentHistory,
-    })
-      .function(
-        "calculate_time_range",
-        "Parse natural language time expressions and calculate exact start/end times for time-based queries",
-        {
-          type: "object",
-          properties: {
-            time_phrase: {
-              type: "string",
-              description:
-                'Natural language time expression extracted from the user request (e.g., "yesterday", "last week", "2 days ago", "past 3 hours")',
-            },
-          },
-          required: ["time_phrase"],
-        },
-        async (time_phrase: string) => {
-          this.logger.debug(`🕒 FUNCTION CALL: calculate_time_range - parsing "${time_phrase}"`);
-
-          const timeRange = extractTimeRange(time_phrase);
-
-          this.context.startTime = timeRange ? timeRange?.from.toISOString() : this.context.endTime;
-          this.context.endTime = timeRange ? timeRange?.to.toISOString() : this.context.endTime;
-
-          this.logger.debug(this.context.startTime);
-          this.logger.debug(this.context.endTime);
-        }
-      )
-      .function(
-        "clear_conversation_history",
-        "Clear conversation history in the database for the current conversation",
-        async () => {
-          await this.context.memory.clear();
-          this.logger.debug("The conversation history has been cleared!");
-        }
-      );
-
-    return prompt;
-  }
-
-  private addCapabilities() {
-    for (const capability of CAPABILITY_DEFINITIONS) {
-      this.prompt.function(
-        `delegate_to_${capability.name}`,
-        `Delegate to ${capability.name} capability`,
-        async () => {
-          return capability.handler(this.context, this.logger.child(capability.name));
-        }
-      );
-    }
-  }
-
-  private async initialize(): Promise<void> {
-    if (!this.isInitialized) {
-      this.prompt = await this.createManagerPrompt();
-      this.addCapabilities();
-      this.isInitialized = true;
-    }
-  }
 
   async processRequest(): Promise<ManagerResult> {
     const normalizedQuestion = normalizeCacheQuery(this.context.text);
@@ -154,15 +66,17 @@ export class ManagerPrompt {
     }
 
     try {
-      const session = (await findActiveEventSession()) || (await getEventSession(this.context.conversationId));
+      const session =
+        (await findActiveEventSession()) || (await getEventSession(this.context.conversationId));
       const eventFileName = session.activeFileName;
 
       if (isGreeting(this.context.text)) {
-        const greeting =
-          session.status === "active"
-            ? activeEventGreeting(eventFileName)
-            : noActiveEventMsg();
-        return { response: greeting };
+        return {
+          response:
+            session.status === "active"
+              ? activeEventGreeting(eventFileName)
+              : noActiveEventMsg(),
+        };
       }
 
       const trimmed = (this.context.text || "").replace(/<\/?at>/gi, " ").trim();
@@ -189,13 +103,12 @@ export class ManagerPrompt {
         return { response: noActiveEventMsg() };
       }
 
-      // Active event (from this chat or another): always use workbook capability
       this.logger.debug(
-        `📊 Routing to events capability (workbook-only; activeSession=${session.conversationId}; file=${eventFileName || "unknown"})`
+        `📊 Routing to events capability (activeSession=${session.conversationId}; file=${eventFileName || "unknown"})`
       );
-      // Stash active workbook conversation so events lookup uses the indexed RAG scope
-      (this.context as MessageContext).activeEventConversationId = session.conversationId;
-      (this.context as MessageContext).activeEventFileName = eventFileName || undefined;
+      this.context.activeEventConversationId = session.conversationId;
+      this.context.activeEventFileName = eventFileName || undefined;
+
       const eventsResponse = await EVENTS_CAPABILITY_DEFINITION.handler(
         this.context,
         this.logger.child("events")

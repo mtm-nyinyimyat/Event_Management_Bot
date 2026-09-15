@@ -373,8 +373,8 @@ async function activateWorkbook(options: {
 
   const details = fileNames.map((name) => `• ${name}`).join("\n");
   return (
-    `Event started.\nLoaded:\n${details}\n\n` +
-    `I will answer questions from this workbook until someone sends /end (or endevent).`
+    `We're live 🙂\nLoaded:\n${details}\n\n` +
+    `Ask me anything about the event — send /end when you're done.`
   );
 }
 
@@ -403,10 +403,9 @@ export async function startEventSession(options: {
     const uploads = getPendingUploads(conversationId);
     if (!uploads.length) {
       return (
-        "No Excel upload is pending.\n" +
+        "I don't have an Excel yet.\n" +
         "1) Upload an .xlsx via paperclip → Upload from this device\n" +
-        "2) Send /start to process it\n\n" +
-        "(SharePoint URL mode is disabled for testing. Set EVENTS_INGEST_MODE=sharepoint later.)"
+        "2) Send /start"
       );
     }
 
@@ -420,9 +419,9 @@ export async function startEventSession(options: {
   // --- SharePoint URL mode (kept for later; enable with EVENTS_INGEST_MODE=sharepoint) ---
   if (!session.pendingUrls.length && session.status !== "active") {
     return (
-      "No SharePoint Excel URL is pending.\n" +
+      "I don't have a SharePoint link yet.\n" +
       "1) Paste a SharePoint/OneDrive Excel link\n" +
-      "2) Send /start to process it"
+      "2) Send /start"
     );
   }
 
@@ -434,7 +433,7 @@ export async function startEventSession(options: {
         : [];
 
   if (!urls.length) {
-    return "No SharePoint URL available to start. Paste a link first, then send /start.";
+    return "I need a SharePoint link first — paste one, then send /start.";
   }
 
   const { workbook, files } = await downloadAndMergeWorkbooks(urls, logger);
@@ -479,22 +478,16 @@ export async function endEventSession(options: {
 
   if (session.status === "idle" && !session.pendingUrls.length && !hadUploads) {
     return isUploadIngestMode()
-      ? "No active event to end. Upload an .xlsx and send /start when ready."
-      : "No active event to end. Paste a SharePoint URL and send /start when ready.";
+      ? "Nothing active right now — upload an .xlsx and send /start when you're ready."
+      : "Nothing active right now — paste a SharePoint URL and send /start when you're ready.";
   }
 
   return (
-    "Event ended.\n" +
-    "Cleared workbook cache, RAG vectors, answer cache, and pending event files.\n" +
+    "All set — I cleared the event data.\n" +
     (isUploadIngestMode()
-      ? "Upload a new .xlsx and send /start to begin another event."
-      : "Paste a new SharePoint link and send /start to begin another event.")
+      ? "Upload a new .xlsx and send /start whenever you want to start again."
+      : "Paste a new SharePoint link and send /start whenever you want to start again.")
   );
-}
-
-export async function requireActiveEvent(conversationId: string): Promise<EventSession | null> {
-  const session = await getEventSession(conversationId);
-  return session.status === "active" ? session : null;
 }
 
 /**
