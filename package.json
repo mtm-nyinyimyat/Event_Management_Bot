@@ -18,13 +18,7 @@
         "clean": "npx rimraf ./dist",
         "build": "npx tsup",
         "start": "node .",
-        "contract:emit": "env-cmd -f .env prisma contract emit",
-        "db:init": "env-cmd -f .env prisma db init",
-        "db:migrate": "env-cmd -f .env prisma db migrate",
-        "db:plan": "env-cmd -f .env prisma migration plan",
-        "db:status": "env-cmd -f .env prisma migration status",
-        "db:verify": "env-cmd -f .env prisma db verify",
-        "db:sign": "env-cmd -f .env prisma db sign",
+
         "db:update": "env-cmd -f .env prisma db update"
     },
     "repository": {
