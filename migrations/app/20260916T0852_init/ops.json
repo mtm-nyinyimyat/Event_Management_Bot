@@ -1,0 +1,853 @@
+[
+  {
+    "id": "schema.public",
+    "label": "Create schema \"public\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres"
+    },
+    "precheck": [],
+    "execute": [
+      {
+        "description": "Create schema \"public\"",
+        "sql": "CREATE SCHEMA IF NOT EXISTS \"public\"",
+        "params": []
+      }
+    ],
+    "postcheck": []
+  },
+  {
+    "id": "table.conversations",
+    "label": "Create table \"conversations\"",
+    "summary": "Creates table \"conversations\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "table",
+        "name": "conversations"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure table \"conversations\" does not exist",
+        "sql": "SELECT (to_regclass($1)) IS NULL AS \"result\"",
+        "params": [
+          "\"public\".\"conversations\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "create table \"conversations\"",
+        "sql": "CREATE TABLE \"public\".\"conversations\" (\n  \"activity_id\" text NOT NULL,\n  \"blob\" jsonb NOT NULL,\n  \"content\" text NOT NULL,\n  \"conversation_id\" text NOT NULL,\n  \"id\" BIGSERIAL NOT NULL,\n  \"name\" text NOT NULL,\n  \"role\" text NOT NULL,\n  \"timestamp\" text NOT NULL,\n  PRIMARY KEY (\"id\")\n)",
+        "params": []
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify table \"conversations\" exists",
+        "sql": "SELECT (to_regclass($1)) IS NOT NULL AS \"result\"",
+        "params": [
+          "\"public\".\"conversations\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "table.event_sessions",
+    "label": "Create table \"event_sessions\"",
+    "summary": "Creates table \"event_sessions\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "table",
+        "name": "event_sessions"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure table \"event_sessions\" does not exist",
+        "sql": "SELECT (to_regclass($1)) IS NULL AS \"result\"",
+        "params": [
+          "\"public\".\"event_sessions\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "create table \"event_sessions\"",
+        "sql": "CREATE TABLE \"public\".\"event_sessions\" (\n  \"active_file_name\" text,\n  \"active_source\" text,\n  \"conversation_id\" text NOT NULL,\n  \"document_id\" text,\n  \"pending_urls\" jsonb DEFAULT '\"[]\"'::jsonb NOT NULL,\n  \"started_at\" timestamptz,\n  \"started_by\" text,\n  \"status\" text NOT NULL,\n  \"updated_at\" timestamptz DEFAULT (now()) NOT NULL,\n  PRIMARY KEY (\"conversation_id\")\n)",
+        "params": []
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify table \"event_sessions\" exists",
+        "sql": "SELECT (to_regclass($1)) IS NOT NULL AS \"result\"",
+        "params": [
+          "\"public\".\"event_sessions\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "table.feedback",
+    "label": "Create table \"feedback\"",
+    "summary": "Creates table \"feedback\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "table",
+        "name": "feedback"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure table \"feedback\" does not exist",
+        "sql": "SELECT (to_regclass($1)) IS NULL AS \"result\"",
+        "params": [
+          "\"public\".\"feedback\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "create table \"feedback\"",
+        "sql": "CREATE TABLE \"public\".\"feedback\" (\n  \"created_at\" timestamptz DEFAULT (now()) NOT NULL,\n  \"feedback\" text,\n  \"id\" BIGSERIAL NOT NULL,\n  \"reaction\" text NOT NULL,\n  \"reply_to_id\" text NOT NULL,\n  PRIMARY KEY (\"id\")\n)",
+        "params": []
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify table \"feedback\" exists",
+        "sql": "SELECT (to_regclass($1)) IS NOT NULL AS \"result\"",
+        "params": [
+          "\"public\".\"feedback\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "table.rag_chunks",
+    "label": "Create table \"rag_chunks\"",
+    "summary": "Creates table \"rag_chunks\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "table",
+        "name": "rag_chunks"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure table \"rag_chunks\" does not exist",
+        "sql": "SELECT (to_regclass($1)) IS NULL AS \"result\"",
+        "params": [
+          "\"public\".\"rag_chunks\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "create table \"rag_chunks\"",
+        "sql": "CREATE TABLE \"public\".\"rag_chunks\" (\n  \"chunk_id\" text NOT NULL,\n  \"dims\" int4 NOT NULL,\n  \"document_id\" text NOT NULL,\n  \"embedding\" vector(384) NOT NULL,\n  \"row_json\" jsonb NOT NULL,\n  \"sheet\" text NOT NULL,\n  \"text\" text NOT NULL,\n  PRIMARY KEY (\"document_id\", \"chunk_id\")\n)",
+        "params": []
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify table \"rag_chunks\" exists",
+        "sql": "SELECT (to_regclass($1)) IS NOT NULL AS \"result\"",
+        "params": [
+          "\"public\".\"rag_chunks\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "table.rag_documents",
+    "label": "Create table \"rag_documents\"",
+    "summary": "Creates table \"rag_documents\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "table",
+        "name": "rag_documents"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure table \"rag_documents\" does not exist",
+        "sql": "SELECT (to_regclass($1)) IS NULL AS \"result\"",
+        "params": [
+          "\"public\".\"rag_documents\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "create table \"rag_documents\"",
+        "sql": "CREATE TABLE \"public\".\"rag_documents\" (\n  \"content_hash\" text,\n  \"created_at\" timestamptz DEFAULT (now()) NOT NULL,\n  \"file_name\" text,\n  \"id\" text NOT NULL,\n  \"source_type\" text NOT NULL,\n  \"source_uri\" text NOT NULL,\n  \"status\" text DEFAULT 'pending' NOT NULL,\n  \"updated_at\" timestamptz DEFAULT (now()) NOT NULL,\n  PRIMARY KEY (\"id\")\n)",
+        "params": []
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify table \"rag_documents\" exists",
+        "sql": "SELECT (to_regclass($1)) IS NOT NULL AS \"result\"",
+        "params": [
+          "\"public\".\"rag_documents\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "table.rag_meta",
+    "label": "Create table \"rag_meta\"",
+    "summary": "Creates table \"rag_meta\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "table",
+        "name": "rag_meta"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure table \"rag_meta\" does not exist",
+        "sql": "SELECT (to_regclass($1)) IS NULL AS \"result\"",
+        "params": [
+          "\"public\".\"rag_meta\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "create table \"rag_meta\"",
+        "sql": "CREATE TABLE \"public\".\"rag_meta\" (\n  \"chunk_count\" int4 NOT NULL,\n  \"dims\" int4 NOT NULL,\n  \"document_id\" text NOT NULL,\n  \"fingerprint\" text NOT NULL,\n  \"model\" text NOT NULL,\n  \"provider\" text NOT NULL,\n  \"updated_at\" timestamptz DEFAULT (now()) NOT NULL,\n  PRIMARY KEY (\"document_id\")\n)",
+        "params": []
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify table \"rag_meta\" exists",
+        "sql": "SELECT (to_regclass($1)) IS NOT NULL AS \"result\"",
+        "params": [
+          "\"public\".\"rag_meta\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "table.rag_sharepoint_sources",
+    "label": "Create table \"rag_sharepoint_sources\"",
+    "summary": "Creates table \"rag_sharepoint_sources\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "table",
+        "name": "rag_sharepoint_sources"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure table \"rag_sharepoint_sources\" does not exist",
+        "sql": "SELECT (to_regclass($1)) IS NULL AS \"result\"",
+        "params": [
+          "\"public\".\"rag_sharepoint_sources\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "create table \"rag_sharepoint_sources\"",
+        "sql": "CREATE TABLE \"public\".\"rag_sharepoint_sources\" (\n  \"delta_link\" text,\n  \"document_id\" text NOT NULL,\n  \"drive_id\" text,\n  \"etag\" text,\n  \"item_id\" text,\n  \"last_modified_at\" timestamptz,\n  \"site_id\" text,\n  \"subscription_expires_at\" timestamptz,\n  \"subscription_id\" text,\n  \"updated_at\" timestamptz DEFAULT (now()) NOT NULL,\n  \"web_url\" text,\n  PRIMARY KEY (\"document_id\")\n)",
+        "params": []
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify table \"rag_sharepoint_sources\" exists",
+        "sql": "SELECT (to_regclass($1)) IS NOT NULL AS \"result\"",
+        "params": [
+          "\"public\".\"rag_sharepoint_sources\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "unique.rag_sharepoint_sources.uq_rag_sharepoint_drive_item",
+    "label": "Add unique constraint on \"rag_sharepoint_sources\" (drive_id, item_id)",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "unique",
+        "name": "uq_rag_sharepoint_drive_item",
+        "table": "rag_sharepoint_sources"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure constraint \"uq_rag_sharepoint_drive_item\" does not exist",
+        "sql": "SELECT NOT EXISTS (SELECT 1 AS \"one\" FROM \"pg_constraint\" AS \"c\" INNER JOIN \"pg_namespace\" AS \"n\" ON \"n\".\"oid\" = \"c\".\"connamespace\" WHERE (\"c\".\"conname\" = $1 AND \"n\".\"nspname\" = $2 AND \"c\".\"conrelid\" = to_regclass($3))) AS \"result\"",
+        "params": [
+          "uq_rag_sharepoint_drive_item",
+          "public",
+          "\"public\".\"rag_sharepoint_sources\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "add unique constraint \"uq_rag_sharepoint_drive_item\"",
+        "sql": "ALTER TABLE \"public\".\"rag_sharepoint_sources\" ADD CONSTRAINT \"uq_rag_sharepoint_drive_item\" UNIQUE (\"drive_id\", \"item_id\")"
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify constraint \"uq_rag_sharepoint_drive_item\" exists",
+        "sql": "SELECT EXISTS (SELECT 1 AS \"one\" FROM \"pg_constraint\" AS \"c\" INNER JOIN \"pg_namespace\" AS \"n\" ON \"n\".\"oid\" = \"c\".\"connamespace\" WHERE (\"c\".\"conname\" = $1 AND \"n\".\"nspname\" = $2 AND \"c\".\"conrelid\" = to_regclass($3))) AS \"result\"",
+        "params": [
+          "uq_rag_sharepoint_drive_item",
+          "public",
+          "\"public\".\"rag_sharepoint_sources\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "index.conversations.idx_conversations_conversation_id",
+    "label": "Create index \"idx_conversations_conversation_id\" on \"conversations\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "index",
+        "name": "idx_conversations_conversation_id",
+        "table": "conversations"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure index \"idx_conversations_conversation_id\" does not exist",
+        "sql": "SELECT (to_regclass($1)) IS NULL AS \"result\"",
+        "params": [
+          "\"public\".\"idx_conversations_conversation_id\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "create index \"idx_conversations_conversation_id\"",
+        "sql": "CREATE INDEX \"idx_conversations_conversation_id\" ON \"public\".\"conversations\" (\"conversation_id\")",
+        "params": []
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify index \"idx_conversations_conversation_id\" exists",
+        "sql": "SELECT (to_regclass($1)) IS NOT NULL AS \"result\"",
+        "params": [
+          "\"public\".\"idx_conversations_conversation_id\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "index.conversations.idx_conversations_timestamp",
+    "label": "Create index \"idx_conversations_timestamp\" on \"conversations\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "index",
+        "name": "idx_conversations_timestamp",
+        "table": "conversations"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure index \"idx_conversations_timestamp\" does not exist",
+        "sql": "SELECT (to_regclass($1)) IS NULL AS \"result\"",
+        "params": [
+          "\"public\".\"idx_conversations_timestamp\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "create index \"idx_conversations_timestamp\"",
+        "sql": "CREATE INDEX \"idx_conversations_timestamp\" ON \"public\".\"conversations\" (\"conversation_id\", \"timestamp\")",
+        "params": []
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify index \"idx_conversations_timestamp\" exists",
+        "sql": "SELECT (to_regclass($1)) IS NOT NULL AS \"result\"",
+        "params": [
+          "\"public\".\"idx_conversations_timestamp\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "index.event_sessions.idx_event_sessions_document_id",
+    "label": "Create index \"idx_event_sessions_document_id\" on \"event_sessions\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "index",
+        "name": "idx_event_sessions_document_id",
+        "table": "event_sessions"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure index \"idx_event_sessions_document_id\" does not exist",
+        "sql": "SELECT (to_regclass($1)) IS NULL AS \"result\"",
+        "params": [
+          "\"public\".\"idx_event_sessions_document_id\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "create index \"idx_event_sessions_document_id\"",
+        "sql": "CREATE INDEX \"idx_event_sessions_document_id\" ON \"public\".\"event_sessions\" (\"document_id\")",
+        "params": []
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify index \"idx_event_sessions_document_id\" exists",
+        "sql": "SELECT (to_regclass($1)) IS NOT NULL AS \"result\"",
+        "params": [
+          "\"public\".\"idx_event_sessions_document_id\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "index.event_sessions.idx_event_sessions_status",
+    "label": "Create index \"idx_event_sessions_status\" on \"event_sessions\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "index",
+        "name": "idx_event_sessions_status",
+        "table": "event_sessions"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure index \"idx_event_sessions_status\" does not exist",
+        "sql": "SELECT (to_regclass($1)) IS NULL AS \"result\"",
+        "params": [
+          "\"public\".\"idx_event_sessions_status\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "create index \"idx_event_sessions_status\"",
+        "sql": "CREATE INDEX \"idx_event_sessions_status\" ON \"public\".\"event_sessions\" (\"status\")",
+        "params": []
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify index \"idx_event_sessions_status\" exists",
+        "sql": "SELECT (to_regclass($1)) IS NOT NULL AS \"result\"",
+        "params": [
+          "\"public\".\"idx_event_sessions_status\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "index.feedback.idx_feedback_reply_to_id",
+    "label": "Create index \"idx_feedback_reply_to_id\" on \"feedback\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "index",
+        "name": "idx_feedback_reply_to_id",
+        "table": "feedback"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure index \"idx_feedback_reply_to_id\" does not exist",
+        "sql": "SELECT (to_regclass($1)) IS NULL AS \"result\"",
+        "params": [
+          "\"public\".\"idx_feedback_reply_to_id\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "create index \"idx_feedback_reply_to_id\"",
+        "sql": "CREATE INDEX \"idx_feedback_reply_to_id\" ON \"public\".\"feedback\" (\"reply_to_id\")",
+        "params": []
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify index \"idx_feedback_reply_to_id\" exists",
+        "sql": "SELECT (to_regclass($1)) IS NOT NULL AS \"result\"",
+        "params": [
+          "\"public\".\"idx_feedback_reply_to_id\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "index.rag_chunks.idx_rag_chunks_sheet",
+    "label": "Create index \"idx_rag_chunks_sheet\" on \"rag_chunks\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "index",
+        "name": "idx_rag_chunks_sheet",
+        "table": "rag_chunks"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure index \"idx_rag_chunks_sheet\" does not exist",
+        "sql": "SELECT (to_regclass($1)) IS NULL AS \"result\"",
+        "params": [
+          "\"public\".\"idx_rag_chunks_sheet\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "create index \"idx_rag_chunks_sheet\"",
+        "sql": "CREATE INDEX \"idx_rag_chunks_sheet\" ON \"public\".\"rag_chunks\" (\"document_id\", \"sheet\")",
+        "params": []
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify index \"idx_rag_chunks_sheet\" exists",
+        "sql": "SELECT (to_regclass($1)) IS NOT NULL AS \"result\"",
+        "params": [
+          "\"public\".\"idx_rag_chunks_sheet\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "index.rag_chunks.rag_chunks_document_id_idx_d3d0944e",
+    "label": "Create index \"rag_chunks_document_id_idx_d3d0944e\" on \"rag_chunks\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "index",
+        "name": "rag_chunks_document_id_idx_d3d0944e",
+        "table": "rag_chunks"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure index \"rag_chunks_document_id_idx_d3d0944e\" does not exist",
+        "sql": "SELECT (to_regclass($1)) IS NULL AS \"result\"",
+        "params": [
+          "\"public\".\"rag_chunks_document_id_idx_d3d0944e\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "create index \"rag_chunks_document_id_idx_d3d0944e\"",
+        "sql": "CREATE INDEX \"rag_chunks_document_id_idx_d3d0944e\" ON \"public\".\"rag_chunks\" (\"document_id\")",
+        "params": []
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify index \"rag_chunks_document_id_idx_d3d0944e\" exists",
+        "sql": "SELECT (to_regclass($1)) IS NOT NULL AS \"result\"",
+        "params": [
+          "\"public\".\"rag_chunks_document_id_idx_d3d0944e\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "index.rag_documents.idx_rag_documents_content_hash",
+    "label": "Create index \"idx_rag_documents_content_hash\" on \"rag_documents\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "index",
+        "name": "idx_rag_documents_content_hash",
+        "table": "rag_documents"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure index \"idx_rag_documents_content_hash\" does not exist",
+        "sql": "SELECT (to_regclass($1)) IS NULL AS \"result\"",
+        "params": [
+          "\"public\".\"idx_rag_documents_content_hash\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "create index \"idx_rag_documents_content_hash\"",
+        "sql": "CREATE INDEX \"idx_rag_documents_content_hash\" ON \"public\".\"rag_documents\" (\"content_hash\")",
+        "params": []
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify index \"idx_rag_documents_content_hash\" exists",
+        "sql": "SELECT (to_regclass($1)) IS NOT NULL AS \"result\"",
+        "params": [
+          "\"public\".\"idx_rag_documents_content_hash\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "index.rag_documents.idx_rag_documents_status",
+    "label": "Create index \"idx_rag_documents_status\" on \"rag_documents\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "index",
+        "name": "idx_rag_documents_status",
+        "table": "rag_documents"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure index \"idx_rag_documents_status\" does not exist",
+        "sql": "SELECT (to_regclass($1)) IS NULL AS \"result\"",
+        "params": [
+          "\"public\".\"idx_rag_documents_status\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "create index \"idx_rag_documents_status\"",
+        "sql": "CREATE INDEX \"idx_rag_documents_status\" ON \"public\".\"rag_documents\" (\"status\")",
+        "params": []
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify index \"idx_rag_documents_status\" exists",
+        "sql": "SELECT (to_regclass($1)) IS NOT NULL AS \"result\"",
+        "params": [
+          "\"public\".\"idx_rag_documents_status\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "foreignKey.event_sessions.event_sessions_document_id_fkey",
+    "label": "Add foreign key \"event_sessions_document_id_fkey\" on \"event_sessions\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "foreignKey",
+        "name": "event_sessions_document_id_fkey",
+        "table": "event_sessions"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure FK \"event_sessions_document_id_fkey\" does not exist",
+        "sql": "SELECT NOT EXISTS (SELECT 1 AS \"one\" FROM \"pg_constraint\" AS \"c\" INNER JOIN \"pg_namespace\" AS \"n\" ON \"n\".\"oid\" = \"c\".\"connamespace\" WHERE (\"c\".\"conname\" = $1 AND \"n\".\"nspname\" = $2 AND \"c\".\"conrelid\" = to_regclass($3))) AS \"result\"",
+        "params": [
+          "event_sessions_document_id_fkey",
+          "public",
+          "\"public\".\"event_sessions\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "add FK \"event_sessions_document_id_fkey\"",
+        "sql": "ALTER TABLE \"public\".\"event_sessions\"\nADD CONSTRAINT \"event_sessions_document_id_fkey\"\nFOREIGN KEY (\"document_id\")\nREFERENCES \"public\".\"rag_documents\" (\"id\")\nON DELETE SET NULL"
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify FK \"event_sessions_document_id_fkey\" exists",
+        "sql": "SELECT EXISTS (SELECT 1 AS \"one\" FROM \"pg_constraint\" AS \"c\" INNER JOIN \"pg_namespace\" AS \"n\" ON \"n\".\"oid\" = \"c\".\"connamespace\" WHERE (\"c\".\"conname\" = $1 AND \"n\".\"nspname\" = $2 AND \"c\".\"conrelid\" = to_regclass($3))) AS \"result\"",
+        "params": [
+          "event_sessions_document_id_fkey",
+          "public",
+          "\"public\".\"event_sessions\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "foreignKey.rag_chunks.rag_chunks_document_id_fkey",
+    "label": "Add foreign key \"rag_chunks_document_id_fkey\" on \"rag_chunks\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "foreignKey",
+        "name": "rag_chunks_document_id_fkey",
+        "table": "rag_chunks"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure FK \"rag_chunks_document_id_fkey\" does not exist",
+        "sql": "SELECT NOT EXISTS (SELECT 1 AS \"one\" FROM \"pg_constraint\" AS \"c\" INNER JOIN \"pg_namespace\" AS \"n\" ON \"n\".\"oid\" = \"c\".\"connamespace\" WHERE (\"c\".\"conname\" = $1 AND \"n\".\"nspname\" = $2 AND \"c\".\"conrelid\" = to_regclass($3))) AS \"result\"",
+        "params": [
+          "rag_chunks_document_id_fkey",
+          "public",
+          "\"public\".\"rag_chunks\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "add FK \"rag_chunks_document_id_fkey\"",
+        "sql": "ALTER TABLE \"public\".\"rag_chunks\"\nADD CONSTRAINT \"rag_chunks_document_id_fkey\"\nFOREIGN KEY (\"document_id\")\nREFERENCES \"public\".\"rag_documents\" (\"id\")\nON DELETE CASCADE"
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify FK \"rag_chunks_document_id_fkey\" exists",
+        "sql": "SELECT EXISTS (SELECT 1 AS \"one\" FROM \"pg_constraint\" AS \"c\" INNER JOIN \"pg_namespace\" AS \"n\" ON \"n\".\"oid\" = \"c\".\"connamespace\" WHERE (\"c\".\"conname\" = $1 AND \"n\".\"nspname\" = $2 AND \"c\".\"conrelid\" = to_regclass($3))) AS \"result\"",
+        "params": [
+          "rag_chunks_document_id_fkey",
+          "public",
+          "\"public\".\"rag_chunks\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "foreignKey.rag_meta.rag_meta_document_id_fkey",
+    "label": "Add foreign key \"rag_meta_document_id_fkey\" on \"rag_meta\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "foreignKey",
+        "name": "rag_meta_document_id_fkey",
+        "table": "rag_meta"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure FK \"rag_meta_document_id_fkey\" does not exist",
+        "sql": "SELECT NOT EXISTS (SELECT 1 AS \"one\" FROM \"pg_constraint\" AS \"c\" INNER JOIN \"pg_namespace\" AS \"n\" ON \"n\".\"oid\" = \"c\".\"connamespace\" WHERE (\"c\".\"conname\" = $1 AND \"n\".\"nspname\" = $2 AND \"c\".\"conrelid\" = to_regclass($3))) AS \"result\"",
+        "params": [
+          "rag_meta_document_id_fkey",
+          "public",
+          "\"public\".\"rag_meta\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "add FK \"rag_meta_document_id_fkey\"",
+        "sql": "ALTER TABLE \"public\".\"rag_meta\"\nADD CONSTRAINT \"rag_meta_document_id_fkey\"\nFOREIGN KEY (\"document_id\")\nREFERENCES \"public\".\"rag_documents\" (\"id\")\nON DELETE CASCADE"
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify FK \"rag_meta_document_id_fkey\" exists",
+        "sql": "SELECT EXISTS (SELECT 1 AS \"one\" FROM \"pg_constraint\" AS \"c\" INNER JOIN \"pg_namespace\" AS \"n\" ON \"n\".\"oid\" = \"c\".\"connamespace\" WHERE (\"c\".\"conname\" = $1 AND \"n\".\"nspname\" = $2 AND \"c\".\"conrelid\" = to_regclass($3))) AS \"result\"",
+        "params": [
+          "rag_meta_document_id_fkey",
+          "public",
+          "\"public\".\"rag_meta\""
+        ]
+      }
+    ]
+  },
+  {
+    "id": "foreignKey.rag_sharepoint_sources.rag_sharepoint_sources_document_id_fkey",
+    "label": "Add foreign key \"rag_sharepoint_sources_document_id_fkey\" on \"rag_sharepoint_sources\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "foreignKey",
+        "name": "rag_sharepoint_sources_document_id_fkey",
+        "table": "rag_sharepoint_sources"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure FK \"rag_sharepoint_sources_document_id_fkey\" does not exist",
+        "sql": "SELECT NOT EXISTS (SELECT 1 AS \"one\" FROM \"pg_constraint\" AS \"c\" INNER JOIN \"pg_namespace\" AS \"n\" ON \"n\".\"oid\" = \"c\".\"connamespace\" WHERE (\"c\".\"conname\" = $1 AND \"n\".\"nspname\" = $2 AND \"c\".\"conrelid\" = to_regclass($3))) AS \"result\"",
+        "params": [
+          "rag_sharepoint_sources_document_id_fkey",
+          "public",
+          "\"public\".\"rag_sharepoint_sources\""
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "add FK \"rag_sharepoint_sources_document_id_fkey\"",
+        "sql": "ALTER TABLE \"public\".\"rag_sharepoint_sources\"\nADD CONSTRAINT \"rag_sharepoint_sources_document_id_fkey\"\nFOREIGN KEY (\"document_id\")\nREFERENCES \"public\".\"rag_documents\" (\"id\")\nON DELETE CASCADE"
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify FK \"rag_sharepoint_sources_document_id_fkey\" exists",
+        "sql": "SELECT EXISTS (SELECT 1 AS \"one\" FROM \"pg_constraint\" AS \"c\" INNER JOIN \"pg_namespace\" AS \"n\" ON \"n\".\"oid\" = \"c\".\"connamespace\" WHERE (\"c\".\"conname\" = $1 AND \"n\".\"nspname\" = $2 AND \"c\".\"conrelid\" = to_regclass($3))) AS \"result\"",
+        "params": [
+          "rag_sharepoint_sources_document_id_fkey",
+          "public",
+          "\"public\".\"rag_sharepoint_sources\""
+        ]
+      }
+    ]
+  }
+]
