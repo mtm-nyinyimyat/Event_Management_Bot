@@ -1,0 +1,122 @@
+// use prisma-8
+// Document-centric event bot schema for Prisma Postgres + pgvector.
+
+types {
+  Embedding384 = pgvector.Vector(384)
+}
+
+model Conversation {
+  id             BigInt @id @default(autoincrement())
+  conversationId String @map("conversation_id")
+  role           String
+  name           String
+  content        String
+  activityId     String @map("activity_id")
+  timestamp      String
+  blob           Jsonb
+
+  @@index([conversationId], map: "idx_conversations_conversation_id")
+  @@index([conversationId, timestamp], map: "idx_conversations_timestamp")
+  @@map("conversations")
+}
+
+model Feedback {
+  id        BigInt            @id @default(autoincrement())
+  replyToId String            @map("reply_to_id")
+  reaction  String
+  feedback  String?
+  createdAt TimestamptzString @default(now()) @map("created_at")
+
+  @@index([replyToId], map: "idx_feedback_reply_to_id")
+  @@map("feedback")
+}
+
+/// Durable Excel / event file identity. RAG vectors hang off this, not the chat.
+model RagDocument {
+  id          String            @id @default(uuid())
+  sourceType  String            @map("source_type")
+  sourceUri   String            @map("source_uri")
+  fileName    String?           @map("file_name")
+  contentHash String?           @map("content_hash")
+  status      String            @default("pending")
+  createdAt   TimestamptzString @default(now()) @map("created_at")
+  updatedAt   TimestamptzString @default(now()) @map("updated_at")
+
+  sessions   EventSession[]
+  meta       RagMeta?
+  chunks     RagChunk[]
+  sharepoint RagSharepointSource?
+
+  @@index([status], map: "idx_rag_documents_status")
+  @@index([contentHash], map: "idx_rag_documents_content_hash")
+  @@map("rag_documents")
+}
+
+/// Graph / SharePoint sync state for a document (production URL ingest).
+model RagSharepointSource {
+  documentId            String             @id @map("document_id")
+  driveId               String?            @map("drive_id")
+  itemId                String?            @map("item_id")
+  siteId                String?            @map("site_id")
+  webUrl                String?            @map("web_url")
+  subscriptionId        String?            @map("subscription_id")
+  subscriptionExpiresAt TimestamptzString? @map("subscription_expires_at")
+  deltaLink             String?            @map("delta_link")
+  etag                  String?
+  lastModifiedAt        TimestamptzString? @map("last_modified_at")
+  updatedAt             TimestamptzString  @default(now()) @map("updated_at")
+
+  document RagDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([driveId, itemId], map: "uq_rag_sharepoint_drive_item")
+  @@map("rag_sharepoint_sources")
+}
+
+/// Chat-scoped event lifecycle; points at the active document when status=active.
+model EventSession {
+  conversationId String             @id @map("conversation_id")
+  documentId     String?            @map("document_id")
+  status         String
+  pendingUrls    Jsonb              @default("[]") @map("pending_urls")
+  activeSource   String?            @map("active_source")
+  activeFileName String?            @map("active_file_name")
+  startedBy      String?            @map("started_by")
+  startedAt      TimestamptzString? @map("started_at")
+  updatedAt      TimestamptzString  @default(now()) @map("updated_at")
+
+  document RagDocument? @relation(fields: [documentId], references: [id], onDelete: SetNull)
+
+  @@index([documentId], map: "idx_event_sessions_document_id")
+  @@index([status], map: "idx_event_sessions_status")
+  @@map("event_sessions")
+}
+
+model RagMeta {
+  documentId  String            @id @map("document_id")
+  fingerprint String
+  provider    String
+  model       String
+  dims        Int
+  chunkCount  Int               @map("chunk_count")
+  updatedAt   TimestamptzString @default(now()) @map("updated_at")
+
+  document RagDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@map("rag_meta")
+}
+
+model RagChunk {
+  documentId String       @map("document_id")
+  chunkId    String       @map("chunk_id")
+  sheet      String
+  text       String
+  rowJson    Jsonb        @map("row_json")
+  embedding  Embedding384
+  dims       Int
+
+  document RagDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@id([documentId, chunkId])
+  @@index([documentId, sheet], map: "idx_rag_chunks_sheet")
+  @@map("rag_chunks")
+}

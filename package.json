@@ -18,17 +18,21 @@
         "clean": "npx rimraf ./dist",
         "build": "npx tsup",
         "start": "node .",
-        "db:migrate": "env-cmd -f .env prisma migrate deploy",
-        "db:migrate:dev": "env-cmd -f .env prisma migrate dev",
-        "db:studio": "env-cmd -f .env prisma studio",
-        "db:status": "env-cmd -f .env prisma migrate status"
+        "contract:emit": "env-cmd -f .env prisma contract emit",
+        "db:init": "env-cmd -f .env prisma db init",
+        "db:migrate": "env-cmd -f .env prisma db migrate",
+        "db:plan": "env-cmd -f .env prisma migration plan",
+        "db:status": "env-cmd -f .env prisma migration status",
+        "db:verify": "env-cmd -f .env prisma db verify",
+        "db:sign": "env-cmd -f .env prisma db sign",
+        "db:update": "env-cmd -f .env prisma db update"
     },
     "repository": {
         "type": "git",
         "url": "https://github.com"
     },
     "engines": {
-        "node": ">=20"
+        "node": ">=22.18.0"
     },
     "dependencies": {
         "@azure/identity": "^4.12.0",
@@ -40,7 +44,10 @@
         "@microsoft/teams.dev": "2.0.12",
         "@microsoft/teams.graph": "2.0.12",
         "@microsoft/teams.openai": "2.0.12",
+        "@prisma/orm-extension-pgvector": "^8.0.0-rc.11",
+        "@prisma/orm-postgres": "^8.0.0-rc.11",
         "pg": "^8.23.0",
+        "temporal-polyfill": "^1.0.5",
         "undici": "^6.21.0",
         "xlsx": "^0.18.5"
     },
@@ -50,10 +57,11 @@
         "dotenv": "^16.4.5",
         "env-cmd": "latest",
         "nodemon": "^3.1.4",
+        "prisma": "^8.0.0-rc.15",
         "rimraf": "^6.0.1",
         "ts-node": "^10.9.2",
         "tsup": "^8.4.0",
-        "prisma": "^6.13.0",
+        "tsx": "^4.23.13",
         "typescript": "^5.8.3"
     }
 }

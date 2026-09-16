@@ -1,24 +1,32 @@
 import "dotenv/config";
-import { defineConfig, env } from "prisma/config";
+import { definePrismaConfig } from "prisma/config";
+import pgvector from "@prisma/orm-extension-pgvector/control";
+import { defineConfig as ormConfig } from "@prisma/orm-postgres/config";
 
 /**
- * Prisma CLI (migrate, studio, db pull) must use the *direct* TCP URL.
- * App runtime should keep using DATABASE_URL (pooled.db.prisma.io).
+ * Prisma 8 config.
+ * - CLI (db init / migrate / verify): prefer DIRECT_URL (db.prisma.io).
+ * - App runtime client in src/prisma/db.ts: use DATABASE_URL (pooled.db.prisma.io).
  */
-const migrateUrl =
-  process.env.DIRECT_URL?.trim() ||
-  process.env.DATABASE_URL?.trim();
+const connection =
+  process.env.DIRECT_URL?.trim() || process.env.DATABASE_URL?.trim();
 
-if (!migrateUrl) {
-  throw new Error("DIRECT_URL or DATABASE_URL must be defined");
+if (!connection) {
+  throw new Error("Set DIRECT_URL (preferred for CLI) or DATABASE_URL in .env");
 }
 
-export default defineConfig({
-  schema: "prisma/schema.prisma",
-  migrations: {
-    path: "prisma/migrations",
+export default definePrismaConfig({
+  skills: {
+    agents: [],
   },
-  datasource: {
-    url: migrateUrl,
-  },
+  orm: ormConfig({
+    contract: "./src/prisma/contract.prisma",
+    extensions: [pgvector],
+    migrations: {
+      dir: "migrations",
+    },
+    db: {
+      connection,
+    },
+  }),
 });
