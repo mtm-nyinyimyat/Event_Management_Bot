@@ -940,6 +940,8 @@ async function loadGraphWorkbook(): Promise<CachedWorkbook> {
 
 export interface WorkbookLookupOptions {
   conversationId?: string;
+  /** RAG scope — preferred over conversationId for vector index lookup. */
+  documentId?: string;
   userId?: string;
   requesterName?: string;
 }
@@ -955,8 +957,12 @@ export async function loadWorkbook(
   const uploaded = resolveUploadedWorkbook(conversationId, options.userId);
   if (!uploaded && isEventSessionMode() && conversationId) {
     try {
-      const { ensureActiveWorkbookInMemory } = await import("./eventSession.js");
+      const { ensureActiveWorkbookInMemory, getEventSession } = await import("./eventSession.js");
       await ensureActiveWorkbookInMemory(conversationId);
+      if (!options.documentId) {
+        const session = await getEventSession(conversationId);
+        options.documentId = session.documentId || undefined;
+      }
     } catch (error) {
       console.warn(
         `Failed to rehydrate active event workbook: ${
@@ -976,7 +982,7 @@ export async function loadWorkbook(
         {
           source: resolvedUpload.source,
           loadedAt: resolvedUpload.loadedAt,
-          conversationId,
+          documentId: options.documentId,
         },
         ragConfig
       );
@@ -1022,7 +1028,7 @@ export async function loadWorkbook(
     await ensureWorkbookIndexed(workbookCache.sheets, {
       source: workbookCache.source,
       loadedAt: workbookCache.loadedAt,
-      conversationId,
+      documentId: options.documentId,
     }, ragConfig);
   } catch (error) {
     console.warn(
@@ -1521,6 +1527,7 @@ export async function searchWorkbook(
     "search",
     normalizeCacheQuery(trimmedQuery),
     String(limit),
+    options.documentId || "",
     options.conversationId || "",
     options.userId || "",
     normalizeCacheQuery(options.requesterName || ""),
@@ -1643,12 +1650,19 @@ async function searchWorkbookUncached(
   // Primary path: hybrid RAG
   if (!summaryOnly && ragConfig.enabled && active) {
     try {
+      let documentId = options.documentId;
+      if (!documentId && options.conversationId) {
+        const { getEventSession } = await import("./eventSession.js");
+        const session = await getEventSession(options.conversationId);
+        documentId = session.documentId || undefined;
+      }
+
       await ensureWorkbookIndexed(
         sheetsData,
         {
           source: active.source,
           loadedAt: active.loadedAt,
-          conversationId: options.conversationId,
+          documentId,
         },
         ragConfig
       );
@@ -1659,7 +1673,7 @@ async function searchWorkbookUncached(
           ...ragConfig,
           topK: Math.min(limit, ragConfig.topK),
         },
-        options.conversationId
+        documentId
       );
 
       if (rag.sheets.length > 0 || rag.hits.length > 0) {

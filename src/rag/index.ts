@@ -14,4 +14,17 @@ export {
   getWorkbookVectorStore,
   resolveVectorBackend,
 } from "./vectorStore";
+export {
+  ensureDocumentSchema,
+  createRagDocument,
+  getRagDocument,
+  updateRagDocumentStatus,
+  archiveRagDocument,
+  deleteRagDocument,
+  upsertSharepointSource,
+  hashContent,
+  type RagDocumentRecord,
+  type DocumentSourceType,
+  type DocumentStatus,
+} from "./documents";
 export type { RagSearchResult, EmbeddingProviderName } from "./types";

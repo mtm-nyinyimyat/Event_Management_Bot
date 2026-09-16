@@ -1,5 +1,16 @@
 import { ILogger } from "@microsoft/teams.common";
-import { clearRagIndexAsync, ensureWorkbookIndexed, getRagConfig } from "../rag";
+import {
+  clearRagIndexAsync,
+  createRagDocument,
+  deleteRagDocument,
+  ensureDocumentSchema,
+  ensureWorkbookIndexed,
+  getRagConfig,
+  hashContent,
+  updateRagDocumentStatus,
+  upsertSharepointSource,
+  type DocumentSourceType,
+} from "../rag";
 import { getPostgresPool } from "../storage/postgres";
 import { clearQueryCaches } from "../utils/queryCache";
 import {
@@ -14,11 +25,12 @@ import {
 import { clearActiveEventExport, setActiveEventExport } from "./activeEventFile";
 import { downloadExcelBinaryFromShareUrl } from "./graphExcelClient";
 
-export type EventSessionStatus = "idle" | "pending" | "active";
+export type EventSessionStatus = "idle" | "pending" | "active" | "ended";
 export type EventIngestMode = "upload" | "sharepoint";
 
 export interface EventSession {
   conversationId: string;
+  documentId?: string | null;
   status: EventSessionStatus;
   pendingUrls: string[];
   activeSource?: string | null;
@@ -54,21 +66,7 @@ export function isUploadIngestMode(): boolean {
 
 async function ensureSchema(): Promise<void> {
   if (!schemaReady) {
-    schemaReady = (async () => {
-      const pool = getPostgresPool();
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS event_sessions (
-          conversation_id TEXT PRIMARY KEY,
-          status TEXT NOT NULL CHECK (status IN ('idle', 'pending', 'active')),
-          pending_urls JSONB NOT NULL DEFAULT '[]'::jsonb,
-          active_source TEXT,
-          active_file_name TEXT,
-          started_by TEXT,
-          started_at TIMESTAMPTZ,
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-      `);
-    })();
+    schemaReady = ensureDocumentSchema();
   }
   await schemaReady;
 }
@@ -124,6 +122,7 @@ export function extractSharePointUrls(text?: string): string[] {
 
 function mapRow(row: {
   conversation_id: string;
+  document_id?: string | null;
   status: EventSessionStatus;
   pending_urls: string[] | string;
   active_source: string | null;
@@ -138,6 +137,7 @@ function mapRow(row: {
       : row.pending_urls || [];
   return {
     conversationId: row.conversation_id,
+    documentId: row.document_id || null,
     status: row.status,
     pendingUrls: pending,
     activeSource: row.active_source,
@@ -148,17 +148,20 @@ function mapRow(row: {
   };
 }
 
+const SESSION_SELECT = `conversation_id, document_id, status, pending_urls, active_source,
+            active_file_name, started_by, started_at, updated_at`;
+
 export async function getEventSession(conversationId: string): Promise<EventSession> {
   await ensureSchema();
   const result = await getPostgresPool().query(
-    `SELECT conversation_id, status, pending_urls, active_source, active_file_name,
-            started_by, started_at, updated_at
+    `SELECT ${SESSION_SELECT}
      FROM event_sessions WHERE conversation_id = $1`,
     [conversationId]
   );
   if (!result.rows[0]) {
     return {
       conversationId,
+      documentId: null,
       status: "idle",
       pendingUrls: [],
       updatedAt: new Date().toISOString(),
@@ -167,12 +170,11 @@ export async function getEventSession(conversationId: string): Promise<EventSess
   return mapRow(result.rows[0]);
 }
 
-/** Active event from any chat (DM and group share one started event). */
+/** Active event from any chat (DM and group share one started event / document). */
 export async function findActiveEventSession(): Promise<EventSession | null> {
   await ensureSchema();
   const result = await getPostgresPool().query(
-    `SELECT conversation_id, status, pending_urls, active_source, active_file_name,
-            started_by, started_at, updated_at
+    `SELECT ${SESSION_SELECT}
      FROM event_sessions
      WHERE status = 'active'
      ORDER BY started_at DESC NULLS LAST
@@ -218,8 +220,8 @@ export async function addPendingUploads(
   const status: EventSessionStatus = current.status === "active" ? "active" : "pending";
 
   await getPostgresPool().query(
-    `INSERT INTO event_sessions (conversation_id, status, pending_urls, updated_at)
-     VALUES ($1, $2, $3::jsonb, NOW())
+    `INSERT INTO event_sessions (conversation_id, document_id, status, pending_urls, updated_at)
+     VALUES ($1, NULL, $2, $3::jsonb, NOW())
      ON CONFLICT (conversation_id) DO UPDATE SET
        status = CASE
          WHEN event_sessions.status = 'active' THEN 'active'
@@ -248,8 +250,8 @@ export async function addPendingShareUrls(
   const status: EventSessionStatus = current.status === "active" ? "active" : "pending";
 
   await getPostgresPool().query(
-    `INSERT INTO event_sessions (conversation_id, status, pending_urls, updated_at)
-     VALUES ($1, $2, $3::jsonb, NOW())
+    `INSERT INTO event_sessions (conversation_id, document_id, status, pending_urls, updated_at)
+     VALUES ($1, NULL, $2, $3::jsonb, NOW())
      ON CONFLICT (conversation_id) DO UPDATE SET
        status = CASE
          WHEN event_sessions.status = 'active' THEN 'active'
@@ -335,6 +337,19 @@ async function downloadAndMergeWorkbooks(
   };
 }
 
+function resolveDocumentSourceType(workbook: CachedWorkbook): DocumentSourceType {
+  if (workbook.sourceType === "upload" || workbook.source.startsWith("chat-upload://")) {
+    return "upload";
+  }
+  if (workbook.sourceType === "graph") {
+    return "graph";
+  }
+  if (/sharepoint\.com|onedrive/i.test(workbook.source)) {
+    return "sharepoint";
+  }
+  return "local";
+}
+
 async function activateWorkbook(options: {
   conversationId: string;
   startedBy: string;
@@ -343,24 +358,57 @@ async function activateWorkbook(options: {
   exportBuffer?: Buffer;
 }): Promise<string> {
   const { conversationId, startedBy, workbook, fileNames, exportBuffer } = options;
+  await ensureSchema();
+
+  const prior = await getEventSession(conversationId);
+  if (prior.documentId && prior.status === "active") {
+    await clearRagIndexAsync({ persist: true, documentId: prior.documentId });
+    await deleteRagDocument(prior.documentId);
+  }
+
+  const contentHash = exportBuffer
+    ? hashContent(exportBuffer)
+    : hashContent(`${workbook.source}::${workbook.loadedAt}::${workbook.sheets.length}`);
+
+  const document = await createRagDocument({
+    sourceType: resolveDocumentSourceType(workbook),
+    sourceUri: workbook.source,
+    fileName: workbook.fileName || fileNames.join(", "),
+    contentHash,
+    status: "syncing",
+  });
+
+  if (document.sourceType === "sharepoint") {
+    await upsertSharepointSource({
+      documentId: document.id,
+      webUrl: workbook.source.split(" | ")[0] || workbook.source,
+    });
+  }
+
   setConversationWorkbook(conversationId, workbook);
   setActiveEventExport({ workbook, conversationId, originalBuffer: exportBuffer });
 
   await ensureWorkbookIndexed(
     workbook.sheets,
-    { source: workbook.source, loadedAt: workbook.loadedAt, conversationId },
+    { source: workbook.source, loadedAt: workbook.loadedAt, documentId: document.id },
     getRagConfig()
   );
+
+  await updateRagDocumentStatus(document.id, "ready", {
+    contentHash,
+    fileName: workbook.fileName || fileNames.join(", "),
+  });
 
   clearQueryCaches();
   clearPendingUploads(conversationId);
 
   await getPostgresPool().query(
     `INSERT INTO event_sessions (
-       conversation_id, status, pending_urls, active_source, active_file_name,
+       conversation_id, document_id, status, pending_urls, active_source, active_file_name,
        started_by, started_at, updated_at
-     ) VALUES ($1, 'active', '[]'::jsonb, $2, $3, $4, NOW(), NOW())
+     ) VALUES ($1, $2, 'active', '[]'::jsonb, $3, $4, $5, NOW(), NOW())
      ON CONFLICT (conversation_id) DO UPDATE SET
+       document_id = EXCLUDED.document_id,
        status = 'active',
        pending_urls = '[]'::jsonb,
        active_source = EXCLUDED.active_source,
@@ -368,7 +416,13 @@ async function activateWorkbook(options: {
        started_by = EXCLUDED.started_by,
        started_at = NOW(),
        updated_at = NOW()`,
-    [conversationId, workbook.source, workbook.fileName || fileNames.join(", "), startedBy]
+    [
+      conversationId,
+      document.id,
+      workbook.source,
+      workbook.fileName || fileNames.join(", "),
+      startedBy,
+    ]
   );
 
   const details = fileNames.map((name) => `• ${name}`).join("\n");
@@ -463,9 +517,18 @@ export async function endEventSession(options: {
   clearConversationWorkbook(targetId);
   clearWorkbookCache();
   clearQueryCaches();
-  await clearRagIndexAsync({ persist: true, conversationId: targetId });
-  if (targetId !== conversationId) {
-    await clearRagIndexAsync({ persist: true, conversationId });
+
+  const documentIds = new Set<string>();
+  if (session.documentId) {
+    documentIds.add(session.documentId);
+  }
+  if (localSession.documentId) {
+    documentIds.add(localSession.documentId);
+  }
+
+  for (const documentId of documentIds) {
+    await clearRagIndexAsync({ persist: true, documentId });
+    await deleteRagDocument(documentId);
   }
 
   await ensureSchema();
@@ -530,11 +593,13 @@ export async function ensureActiveWorkbookInMemory(
   const { workbook } = await downloadAndMergeWorkbooks(urls, logger);
   setConversationWorkbook(conversationId, workbook);
 
-  await ensureWorkbookIndexed(
-    workbook.sheets,
-    { source: workbook.source, loadedAt: workbook.loadedAt, conversationId },
-    getRagConfig()
-  );
+  if (session.documentId) {
+    await ensureWorkbookIndexed(
+      workbook.sheets,
+      { source: workbook.source, loadedAt: workbook.loadedAt, documentId: session.documentId },
+      getRagConfig()
+    );
+  }
 
   return workbook;
 }

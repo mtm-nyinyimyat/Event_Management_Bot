@@ -109,24 +109,24 @@ function getClient(config: RagRuntimeConfig): EmbeddingClient {
   return embeddingClient;
 }
 
-function scopeKey(conversationId?: string): string {
-  return conversationId?.trim() || "__global__";
+function scopeKey(documentId?: string): string {
+  return documentId?.trim() || "__global__";
 }
 
-export function clearRagIndex(options?: { persist?: boolean; conversationId?: string }): void {
+export function clearRagIndex(options?: { persist?: boolean; documentId?: string }): void {
   void clearRagIndexAsync(options);
 }
 
 export async function clearRagIndexAsync(options?: {
   persist?: boolean;
-  conversationId?: string;
+  documentId?: string;
 }): Promise<void> {
   await clearAllWorkbookVectorStores({
     persist: options?.persist === true,
-    conversationId: options?.conversationId,
+    documentId: options?.documentId,
   });
-  if (options?.conversationId) {
-    indexingPromises.delete(scopeKey(options.conversationId));
+  if (options?.documentId) {
+    indexingPromises.delete(scopeKey(options.documentId));
   } else {
     indexingPromises.clear();
   }
@@ -134,14 +134,14 @@ export async function clearRagIndexAsync(options?: {
 
 export async function ensureWorkbookIndexed(
   sheets: SheetData[],
-  meta: { source: string; loadedAt: number; conversationId?: string },
+  meta: { source: string; loadedAt: number; documentId?: string },
   config: RagRuntimeConfig
 ): Promise<void> {
   const client = getClient(config);
   const fingerprint = workbookFingerprint(sheets, meta.source, client.model);
-  const store = getWorkbookVectorStore(meta.conversationId);
+  const store = getWorkbookVectorStore(meta.documentId);
   const backend = store.getBackend();
-  const key = scopeKey(meta.conversationId);
+  const key = scopeKey(meta.documentId);
 
   if (
     store.getFingerprint() === fingerprint &&
@@ -203,11 +203,11 @@ export async function retrieveHybrid(
   query: string,
   sheets: SheetData[],
   config: RagRuntimeConfig,
-  conversationId?: string
+  documentId?: string
 ): Promise<RagSearchResult> {
   const topK = Math.max(1, Math.min(config.topK, 50));
   const client = getClient(config);
-  const store = getWorkbookVectorStore(conversationId);
+  const store = getWorkbookVectorStore(documentId);
   const [queryEmbedding] = await client.embed([query]);
   const vectorHits = store.search(queryEmbedding, Math.max(topK * 3, topK));
 

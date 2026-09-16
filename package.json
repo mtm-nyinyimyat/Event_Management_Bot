@@ -17,7 +17,11 @@
         "dev": "npx nodemon -w \"./src/**\" -w \".env\" -w \".localConfigs\" -e ts,env --exec \"node --inspect=9239 -r ts-node/register ./src/index.ts\"",
         "clean": "npx rimraf ./dist",
         "build": "npx tsup",
-        "start": "node ."
+        "start": "node .",
+        "db:migrate": "env-cmd -f .env prisma migrate deploy",
+        "db:migrate:dev": "env-cmd -f .env prisma migrate dev",
+        "db:studio": "env-cmd -f .env prisma studio",
+        "db:status": "env-cmd -f .env prisma migrate status"
     },
     "repository": {
         "type": "git",
@@ -49,6 +53,7 @@
         "rimraf": "^6.0.1",
         "ts-node": "^10.9.2",
         "tsup": "^8.4.0",
+        "prisma": "^6.13.0",
         "typescript": "^5.8.3"
     }
 }

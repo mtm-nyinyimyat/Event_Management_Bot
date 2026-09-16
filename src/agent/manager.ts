@@ -104,9 +104,10 @@ export class ManagerPrompt {
       }
 
       this.logger.debug(
-        `📊 Routing to events capability (activeSession=${session.conversationId}; file=${eventFileName || "unknown"})`
+        `📊 Routing to events capability (activeSession=${session.conversationId}; document=${session.documentId || "none"}; file=${eventFileName || "unknown"})`
       );
       this.context.activeEventConversationId = session.conversationId;
+      this.context.activeEventDocumentId = session.documentId || undefined;
       this.context.activeEventFileName = eventFileName || undefined;
 
       const eventsResponse = await EVENTS_CAPABILITY_DEFINITION.handler(

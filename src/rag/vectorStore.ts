@@ -9,18 +9,18 @@ export function resolveVectorBackend(): VectorBackendName {
 }
 
 /**
- * Warm in-memory view of one conversation's RAG index for fast cosine search.
- * Source of truth is Postgres (pgvector).
+ * Warm in-memory view of one document's RAG index for fast cosine search.
+ * Source of truth is Postgres (pgvector), keyed by document_id.
  */
 export class InMemoryVectorStore {
   private chunks: IndexedChunk[] = [];
   private fingerprint = "";
   private provider = "";
   private model = "";
-  private conversationId = "";
+  private documentId = "";
 
-  constructor(conversationId = "") {
-    this.conversationId = conversationId;
+  constructor(documentId = "") {
+    this.documentId = documentId;
   }
 
   get size(): number {
@@ -39,8 +39,8 @@ export class InMemoryVectorStore {
     return this.model;
   }
 
-  getConversationId(): string {
-    return this.conversationId;
+  getDocumentId(): string {
+    return this.documentId;
   }
 
   getBackend(): VectorBackendName {
@@ -53,17 +53,20 @@ export class InMemoryVectorStore {
     this.provider = "";
     this.model = "";
     if (options?.persist) {
-      await getPostgresVectorStore().clear(this.conversationId || undefined);
+      await getPostgresVectorStore().clear(this.documentId || undefined);
     }
   }
 
   /** Load persisted index when fingerprint/provider/model match. */
   async loadFromDb(fingerprint: string, provider: string, model: string): Promise<boolean> {
-    const db = getPostgresVectorStore();
-    if (!(await db.hasFingerprint(fingerprint, provider, model, this.conversationId || undefined))) {
+    if (!this.documentId) {
       return false;
     }
-    const chunks = await db.loadAll(this.conversationId || undefined);
+    const db = getPostgresVectorStore();
+    if (!(await db.hasFingerprint(fingerprint, provider, model, this.documentId))) {
+      return false;
+    }
+    const chunks = await db.loadAll(this.documentId);
     if (!chunks.length) {
       return false;
     }
@@ -84,7 +87,7 @@ export class InMemoryVectorStore {
     this.provider = meta.provider;
     this.model = meta.model;
 
-    if (meta.persist === false) {
+    if (meta.persist === false || !this.documentId) {
       return;
     }
 
@@ -92,7 +95,7 @@ export class InMemoryVectorStore {
       fingerprint,
       provider: meta.provider,
       model: meta.model,
-      conversationId: this.conversationId || undefined,
+      documentId: this.documentId,
     });
   }
 
@@ -121,12 +124,12 @@ export class InMemoryVectorStore {
 
 const stores = new Map<string, InMemoryVectorStore>();
 
-function scopeKey(conversationId?: string): string {
-  return conversationId?.trim() || "__global__";
+function scopeKey(documentId?: string): string {
+  return documentId?.trim() || "__global__";
 }
 
-export function getWorkbookVectorStore(conversationId?: string): InMemoryVectorStore {
-  const key = scopeKey(conversationId);
+export function getWorkbookVectorStore(documentId?: string): InMemoryVectorStore {
+  const key = scopeKey(documentId);
   let store = stores.get(key);
   if (!store) {
     store = new InMemoryVectorStore(key === "__global__" ? "" : key);
@@ -135,17 +138,17 @@ export function getWorkbookVectorStore(conversationId?: string): InMemoryVectorS
   return store;
 }
 
-/** @deprecated Prefer getWorkbookVectorStore(conversationId) */
+/** @deprecated Prefer getWorkbookVectorStore(documentId) */
 export const workbookVectorStore = getWorkbookVectorStore();
 
 export async function clearAllWorkbookVectorStores(options?: {
   persist?: boolean;
-  conversationId?: string;
+  documentId?: string;
 }): Promise<void> {
-  if (options?.conversationId) {
-    const store = getWorkbookVectorStore(options.conversationId);
+  if (options?.documentId) {
+    const store = getWorkbookVectorStore(options.documentId);
     await store.clear({ persist: options.persist === true });
-    stores.delete(scopeKey(options.conversationId));
+    stores.delete(scopeKey(options.documentId));
     return;
   }
 

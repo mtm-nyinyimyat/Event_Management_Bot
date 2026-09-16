@@ -29,6 +29,7 @@ export class EventsCapability extends BaseCapability {
         try {
           const result = await searchWorkbook(query || "", max_results ?? 20, {
             conversationId: context.activeEventConversationId || context.conversationId,
+            documentId: context.activeEventDocumentId,
             userId: context.userId,
             requesterName: senderName,
           });
