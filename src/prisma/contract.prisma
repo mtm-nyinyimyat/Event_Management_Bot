@@ -64,6 +64,7 @@ model RagSharepointSource {
   deltaLink             String?            @map("delta_link")
   etag                  String?
   lastModifiedAt        TimestamptzString? @map("last_modified_at")
+  lastDeltaSyncAt       TimestamptzString? @map("last_delta_sync_at")
   updatedAt             TimestamptzString  @default(now()) @map("updated_at")
 
   document RagDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)

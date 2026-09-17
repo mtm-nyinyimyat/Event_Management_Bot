@@ -22,8 +22,11 @@ export {
   archiveRagDocument,
   deleteRagDocument,
   upsertSharepointSource,
+  listActiveSharepointSources,
+  getSharepointSource,
   hashContent,
   type RagDocumentRecord,
+  type RagSharepointSourceRecord,
   type DocumentSourceType,
   type DocumentStatus,
 } from "./documents";

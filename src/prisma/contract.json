@@ -694,6 +694,13 @@
                   "kind": "scalar"
                 }
               },
+              "lastDeltaSyncAt": {
+                "nullable": true,
+                "type": {
+                  "codecId": "pg/timestamptz-string@1",
+                  "kind": "scalar"
+                }
+              },
               "lastModifiedAt": {
                 "nullable": true,
                 "type": {
@@ -771,6 +778,9 @@
                 },
                 "itemId": {
                   "column": "item_id"
+                },
+                "lastDeltaSyncAt": {
+                  "column": "last_delta_sync_at"
                 },
                 "lastModifiedAt": {
                   "column": "last_modified_at"
@@ -1286,6 +1296,11 @@
                   "nativeType": "text",
                   "nullable": true
                 },
+                "last_delta_sync_at": {
+                  "codecId": "pg/timestamptz-string@1",
+                  "nativeType": "timestamptz",
+                  "nullable": true
+                },
                 "last_modified_at": {
                   "codecId": "pg/timestamptz-string@1",
                   "nativeType": "timestamptz",
@@ -1362,7 +1377,7 @@
         "kind": "postgres-schema"
       }
     },
-    "storageHash": "45171294cfb86c7e16d6205724b8f2cec224bc5cdceb3feefad1eb4178cb9ba7",
+    "storageHash": "7ff1d3cf141e9dd0ed8a1f2c0880cca598ee9a6edfc0907442f2138ef224a7eb",
     "types": {
       "Embedding384": {
         "codecId": "pg/vector@1",

@@ -31,13 +31,31 @@ import {
   isUploadIngestMode,
   startEventSession,
 } from "./events/eventSession";
+import { startDeltaPolling } from "./events/deltaSync";
 import { IDatabase } from "./storage/database";
 import { StorageFactory } from "./storage/storageFactory";
 import { logModelConfigs, validateEnvironment } from "./utils/config";
-import { createMessageContext } from "./utils/messageContext";
-import { createMessageRecords, finalizePromptResponse, formatEventDisplayName } from "./utils/utils";
+import { createMessageContext, MessageContext } from "./utils/messageContext";
+import {
+  BotReplyOptions,
+  createMessageRecords,
+  finalizePromptResponse,
+  formatEventDisplayName,
+} from "./utils/utils";
 
 const logger = new ConsoleLogger("collaborator", { level: "debug" });
+
+/** @mention sender + reply in the channel thread of the triggering post. */
+function replyOptionsFromContext(
+  context: MessageContext,
+  extras?: Pick<BotReplyOptions, "withFeedback">
+): BotReplyOptions {
+  return {
+    mentionAccount: context.senderAccount,
+    replyToId: context.replyToId,
+    withFeedback: extras?.withFeedback,
+  };
+}
 
 const createTokenFactory = () => {
   return async (scope: string | string[], tenantId?: string): Promise<string> => {
@@ -125,12 +143,21 @@ function stripMentions(text?: string): string {
 async function sendServiceUnavailable(
   send: (activity: ActivityLike) => Promise<unknown>,
   error: unknown,
-  log: ILogger
+  log: ILogger,
+  context?: MessageContext
 ): Promise<void> {
   const detail = describeNetworkError(error);
   log.error(`❌ User-facing service unavailable: ${detail}`);
   try {
     const reply = await createServiceUnavailableReply();
+    if (context?.replyToId) {
+      reply.message.replyToId = context.replyToId;
+    }
+    if (context?.senderAccount?.id && context.senderAccount.name) {
+      reply.message.addMention(context.senderAccount, { addText: false });
+      const body = String(reply.message.text || "").trim();
+      reply.message.text = `<at>${context.senderAccount.name}</at> ${body}`;
+    }
     await send(reply.message);
     if (reply.hasFileConsent) {
       log.debug(`📎 Sent file consent card for ${reply.fileName}`);
@@ -144,21 +171,24 @@ async function sendServiceUnavailable(
 
 async function replyFromManager(
   send: (activity: ActivityLike) => Promise<{ id?: string }>,
-  context: Awaited<ReturnType<typeof createMessageContext>>,
+  context: MessageContext,
   activity: Parameters<typeof createMessageRecords>[0][0],
   log: ILogger
 ): Promise<ReturnType<typeof createMessageRecords>> {
   try {
     const manager = new ManagerPrompt(context, log.child("manager"));
     const result = await manager.processRequest();
-    const formattedResult = finalizePromptResponse(result.response);
+    const formattedResult = finalizePromptResponse(
+      result.response,
+      replyOptionsFromContext(context)
+    );
     const sent = await send(formattedResult);
     if (sent.id) {
       formattedResult.id = sent.id;
     }
     return createMessageRecords([activity, formattedResult]);
   } catch (error) {
-    await sendServiceUnavailable(send, error, log);
+    await sendServiceUnavailable(send, error, log, context);
     return createMessageRecords([activity]);
   }
 }
@@ -198,7 +228,9 @@ app.on("message", async ({ send, activity, api }) => {
             ? `Nice 🙂 What do you need for "${eventLabel}"?`
             : "Nice 🙂 What do you need for the event?"
           : "Nice 🙂 Upload an .xlsx and hit /start when you're ready.";
-        const sent = await send(ack);
+        const sent = await send(
+          finalizePromptResponse(ack, replyOptionsFromContext(context, { withFeedback: false }))
+        );
         trackedMessages = createMessageRecords([activity]);
         logger.debug(`Ignored emoticon-only message; replied id=${sent.id}`);
       } else if (isStartEventCommand(text)) {
@@ -206,7 +238,12 @@ app.on("message", async ({ send, activity, api }) => {
           const confirmation =
             "There's already an event running.\n" +
             "Send /end first if you want to start a new one.";
-          const sent = await send(confirmation);
+          const sent = await send(
+            finalizePromptResponse(
+              confirmation,
+              replyOptionsFromContext(context, { withFeedback: false })
+            )
+          );
           trackedMessages = createMessageRecords([activity]);
           logger.debug(`Blocked /start while event active; replied id=${sent.id}`);
         } else {
@@ -215,7 +252,12 @@ app.on("message", async ({ send, activity, api }) => {
             startedBy: userName,
             logger: logger.child("event-session"),
           });
-          const sent = await send(confirmation);
+          const sent = await send(
+            finalizePromptResponse(
+              confirmation,
+              replyOptionsFromContext(context, { withFeedback: false })
+            )
+          );
           trackedMessages = createMessageRecords([activity]);
           logger.debug(`Event start replied id=${sent.id}`);
         }
@@ -224,7 +266,12 @@ app.on("message", async ({ send, activity, api }) => {
           conversationId,
           logger: logger.child("event-session"),
         });
-        const sent = await send(confirmation);
+        const sent = await send(
+          finalizePromptResponse(
+            confirmation,
+            replyOptionsFromContext(context, { withFeedback: false })
+          )
+        );
         trackedMessages = createMessageRecords([activity]);
         logger.debug(`Event end replied id=${sent.id}`);
       } else if (ingestMode === "upload") {
@@ -245,7 +292,12 @@ app.on("message", async ({ send, activity, api }) => {
               const confirmation =
                 "There's already an event running.\n" +
                 "Send /end first if you want to upload a new Excel.";
-              const sent = await send(confirmation);
+              const sent = await send(
+                finalizePromptResponse(
+                  confirmation,
+                  replyOptionsFromContext(context, { withFeedback: false })
+                )
+              );
               trackedMessages = createMessageRecords([activity]);
               logger.debug(`Blocked upload while event active; replied id=${sent.id}`);
             } else {
@@ -255,18 +307,28 @@ app.on("message", async ({ send, activity, api }) => {
                 `Got your Excel 🙂\n${list}\n\n` +
                 `Send /start when you want me to load it.\n` +
                 `Send /end later to clear everything.`;
-              const sent = await send(confirmation);
+              const sent = await send(
+                finalizePromptResponse(
+                  confirmation,
+                  replyOptionsFromContext(context, { withFeedback: false })
+                )
+              );
               trackedMessages = createMessageRecords([activity]);
               logger.debug(`Pending Excel upload(s) saved; replied id=${sent.id}`);
             }
           } else if (excelUploadLikely) {
-            await send(FILE_UPLOAD_HELP);
+            await send(
+              finalizePromptResponse(
+                FILE_UPLOAD_HELP,
+                replyOptionsFromContext(context, { withFeedback: false })
+              )
+            );
             trackedMessages = createMessageRecords([activity]);
           } else {
             trackedMessages = await replyFromManager(send, context, activity, logger);
           }
         } catch (uploadError) {
-          await sendServiceUnavailable(send, uploadError, logger);
+          await sendServiceUnavailable(send, uploadError, logger, context);
           trackedMessages = createMessageRecords([activity]);
         }
       } else {
@@ -281,7 +343,12 @@ app.on("message", async ({ send, activity, api }) => {
             const confirmation =
               "There's already an event running.\n" +
               "Send /end first if you want to paste a new link.";
-            const sent = await send(confirmation);
+            const sent = await send(
+              finalizePromptResponse(
+                confirmation,
+                replyOptionsFromContext(context, { withFeedback: false })
+              )
+            );
             trackedMessages = createMessageRecords([activity]);
             logger.debug(`Blocked SharePoint URL while event active; replied id=${sent.id}`);
           } else {
@@ -290,7 +357,12 @@ app.on("message", async ({ send, activity, api }) => {
               `Got your SharePoint link 🙂 (${session.pendingUrls.length} pending)\n\n` +
               `Send /start when you want me to load it.\n` +
               `Send /end later to clear everything.`;
-            const sent = await send(confirmation);
+            const sent = await send(
+              finalizePromptResponse(
+                confirmation,
+                replyOptionsFromContext(context, { withFeedback: false })
+              )
+            );
             trackedMessages = createMessageRecords([activity]);
             logger.debug(`Pending SharePoint URL(s) saved; replied id=${sent.id}`);
           }
@@ -308,7 +380,7 @@ app.on("message", async ({ send, activity, api }) => {
             "Connect the corporate VPN, or set HTTPS_PROXY in .env if you use a proxy."
         );
       }
-      await sendServiceUnavailable(send, error, logger);
+      await sendServiceUnavailable(send, error, logger, context);
       trackedMessages = createMessageRecords([activity]);
     }
   } else {
@@ -419,5 +491,6 @@ app.on("install.add", async ({ send }) => {
 
   await app.start(port);
 
+  startDeltaPolling(logger.child("delta"));
   logger.debug(`🚀 Collab Agent started on port ${port}`);
 })();

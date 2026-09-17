@@ -1,4 +1,4 @@
-import { IMessageActivity, MessageActivity } from "@microsoft/teams.api";
+import { Account, IMessageActivity, MessageActivity } from "@microsoft/teams.api";
 import { MessageRecord } from "../storage/types";
 
 /**
@@ -23,8 +23,39 @@ export function formatEventDisplayName(
   return name || fallback;
 }
 
-export function finalizePromptResponse(text: string): MessageActivity {
-  return new MessageActivity(text).addAiGenerated().addFeedback();
+export interface BotReplyOptions {
+  /** @mention this Teams account in the reply. */
+  mentionAccount?: Account;
+  /** Reply in the thread under this activity id (channel/group). */
+  replyToId?: string;
+  /** Attach AI-generated + feedback entities (default true). */
+  withFeedback?: boolean;
+}
+
+/**
+ * Build an outgoing message with optional @mention and thread replyToId.
+ */
+export function finalizePromptResponse(
+  text: string,
+  options?: BotReplyOptions
+): MessageActivity {
+  const body = String(text || "").trim();
+  const activity = new MessageActivity(body);
+
+  if (options?.withFeedback !== false) {
+    activity.addAiGenerated().addFeedback();
+  }
+
+  if (options?.mentionAccount?.id && options.mentionAccount.name) {
+    activity.addMention(options.mentionAccount, { addText: false });
+    activity.text = `<at>${options.mentionAccount.name}</at> ${body}`;
+  }
+
+  if (options?.replyToId) {
+    activity.replyToId = options.replyToId;
+  }
+
+  return activity;
 }
 
 export function createMessageRecords(activities: IMessageActivity[]): MessageRecord[] {

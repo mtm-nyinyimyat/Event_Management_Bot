@@ -1,4 +1,4 @@
-import { Client, IMessageActivity } from "@microsoft/teams.api";
+import { Account, Client, IMessageActivity } from "@microsoft/teams.api";
 import { ConversationMemory } from "../storage/conversationMemory";
 import { IDatabase } from "../storage/database";
 
@@ -16,6 +16,10 @@ export interface MessageContext {
   activeEventFileName?: string;
   userId?: string;
   userName: string;
+  /** Teams account of the message sender (for @mentions in replies). */
+  senderAccount?: Account;
+  /** Parent/root activity id — used to reply in the same channel thread. */
+  replyToId?: string;
   timestamp: string;
   isPersonalChat: boolean;
   activityId: string;
@@ -56,13 +60,18 @@ export async function createMessageContext(
     members = await getConversationParticipantsFromAPI(api, conversationId);
   }
 
+  const isPersonalChat = activity.conversation.conversationType === "personal";
+
   return {
     text: activity.text || "",
     conversationId,
     userId,
     userName: activity.from.name || "User",
+    senderAccount: activity.from,
+    // Channel/group: reply under this post (Excel upload root or in-thread message).
+    replyToId: !isPersonalChat ? activity.id : undefined,
     timestamp: activity.timestamp?.toString() || "Unknown",
-    isPersonalChat: activity.conversation.conversationType === "personal",
+    isPersonalChat,
     activityId: activity.id,
     members,
     memory: new ConversationMemory(storage, conversationId),

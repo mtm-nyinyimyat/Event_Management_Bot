@@ -23,7 +23,11 @@ import {
   type SheetData,
 } from "./excelStore";
 import { clearActiveEventExport, setActiveEventExport } from "./activeEventFile";
-import { downloadExcelBinaryFromShareUrl } from "./graphExcelClient";
+import {
+  downloadExcelBinaryFromShareUrl,
+  getDeltaChanges,
+  resolveSharePointExcelItem,
+} from "./graphExcelClient";
 
 export type EventSessionStatus = "idle" | "pending" | "active" | "ended";
 export type EventIngestMode = "upload" | "sharepoint";
@@ -329,7 +333,7 @@ async function downloadAndMergeWorkbooks(
     files,
     workbook: {
       source: urls.join(" | "),
-      sourceType: "upload",
+      sourceType: "graph",
       fileName: files.join(", "),
       sheets: allSheets,
       loadedAt: Date.now(),
@@ -378,11 +382,41 @@ async function activateWorkbook(options: {
     status: "syncing",
   });
 
-  if (document.sourceType === "sharepoint") {
-    await upsertSharepointSource({
-      documentId: document.id,
-      webUrl: workbook.source.split(" | ")[0] || workbook.source,
-    });
+  if (document.sourceType === "sharepoint" || document.sourceType === "graph") {
+    const url = (workbook.source.split(" | ")[0] || workbook.source).trim();
+    if (url && /^https?:\/\//i.test(url)) {
+      try {
+        const resolved = await resolveSharePointExcelItem(url);
+        const delta = await getDeltaChanges({
+          driveId: resolved.driveId,
+          itemId: resolved.itemId,
+        });
+        const baselineEtag =
+          resolved.eTag ||
+          delta.items.find((item) => item.id === resolved.itemId)?.eTag ||
+          null;
+        await upsertSharepointSource({
+          documentId: document.id,
+          driveId: resolved.driveId,
+          itemId: resolved.itemId,
+          webUrl: resolved.webUrl || url,
+          etag: baselineEtag,
+          lastModifiedAt: resolved.lastModifiedDateTime || null,
+          deltaLink: delta.deltaLink,
+          lastDeltaSyncAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(
+          `SharePoint delta seed failed (webUrl only): ${message}`
+        );
+        await upsertSharepointSource({
+          documentId: document.id,
+          webUrl: url,
+          lastDeltaSyncAt: new Date().toISOString(),
+        });
+      }
+    }
   }
 
   setConversationWorkbook(conversationId, workbook);

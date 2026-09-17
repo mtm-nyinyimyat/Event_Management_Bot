@@ -6,6 +6,8 @@ export interface GraphDriveItem {
   webUrl?: string;
   lastModifiedDateTime?: string;
   size?: number;
+  eTag?: string;
+  cTag?: string;
   file?: { mimeType?: string };
   folder?: Record<string, unknown>;
 }
@@ -340,7 +342,7 @@ async function getItemByPath(driveId: string, itemPath: string): Promise<GraphDr
 
 async function getItemById(driveId: string, itemId: string): Promise<GraphDriveItem> {
   return graphFetch<GraphDriveItem>(
-    `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${itemId}?$select=id,name,webUrl,lastModifiedDateTime,size,file,folder`
+    `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${itemId}?$select=id,name,webUrl,lastModifiedDateTime,size,eTag,cTag,file,folder`
   );
 }
 
@@ -351,7 +353,7 @@ interface SharedDriveItem extends GraphDriveItem {
 async function getItemByShareUrl(shareUrl: string): Promise<SharedDriveItem> {
   const encoded = encodeSharingUrl(shareUrl);
   return graphFetch<SharedDriveItem>(
-    `https://graph.microsoft.com/v1.0/shares/${encoded}/driveItem?$select=id,name,webUrl,lastModifiedDateTime,size,file,folder,parentReference`
+    `https://graph.microsoft.com/v1.0/shares/${encoded}/driveItem?$select=id,name,webUrl,lastModifiedDateTime,size,eTag,cTag,file,folder,parentReference`
   );
 }
 
@@ -663,29 +665,230 @@ export async function fetchTeamsMessageFromGraph(
 export async function downloadExcelBinaryFromShareUrl(
   shareUrl: string
 ): Promise<{ buffer: Buffer; fileName: string }> {
+  const resolved = await resolveSharePointExcelItem(shareUrl);
+  return downloadExcelBinaryFromDriveItem(resolved.driveId, resolved.itemId, resolved.fileName);
+}
+
+export interface ResolvedSharePointExcelItem {
+  driveId: string;
+  itemId: string;
+  fileName: string;
+  webUrl?: string;
+  eTag?: string;
+  lastModifiedDateTime?: string;
+}
+
+/** Resolve a SharePoint/OneDrive share or open URL to drive + item identity. */
+export async function resolveSharePointExcelItem(
+  shareUrl: string
+): Promise<ResolvedSharePointExcelItem> {
   const item = await getItemByShareUrl(shareUrl);
   const driveId = item.parentReference?.driveId;
   if (!driveId || !item.id) {
     throw new Error(`Could not resolve drive item for shared Excel URL: ${shareUrl}`);
   }
+  if (!isExcelItem(item)) {
+    throw new Error(`Shared item "${item.name}" is not an Excel file`);
+  }
+  return {
+    driveId,
+    itemId: item.id,
+    fileName: item.name || extractFileNameFromUrl(shareUrl) || "workbook.xlsx",
+    webUrl: item.webUrl || shareUrl,
+    eTag: item.eTag,
+    lastModifiedDateTime: item.lastModifiedDateTime,
+  };
+}
 
+export async function downloadExcelBinaryFromDriveItem(
+  driveId: string,
+  itemId: string,
+  preferredFileName?: string
+): Promise<{ buffer: Buffer; fileName: string }> {
   const meta = await graphFetch<{
     name?: string;
+    eTag?: string;
     "@microsoft.graph.downloadUrl"?: string;
-  }>(`https://graph.microsoft.com/v1.0/drives/${driveId}/items/${item.id}?$select=id,name,@microsoft.graph.downloadUrl`);
+  }>(
+    `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${itemId}?$select=id,name,eTag,@microsoft.graph.downloadUrl`
+  );
 
-  const fileName = item.name || meta.name || extractFileNameFromUrl(shareUrl) || "workbook.xlsx";
+  const fileName = preferredFileName || meta.name || "workbook.xlsx";
   const downloadUrl = meta["@microsoft.graph.downloadUrl"];
   if (downloadUrl) {
     const response = await fetch(downloadUrl, { redirect: "follow" });
     if (!response.ok) {
-      throw new Error(`Failed to download shared Excel (${response.status})`);
+      throw new Error(`Failed to download Excel (${response.status})`);
     }
     return { buffer: Buffer.from(await response.arrayBuffer()), fileName };
   }
 
   const content = await graphFetch<ArrayBuffer>(
-    `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${item.id}/content`
+    `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${itemId}/content`
   );
   return { buffer: Buffer.from(content), fileName };
+}
+
+export interface GraphDeltaItem {
+  id: string;
+  name?: string;
+  eTag?: string;
+  cTag?: string;
+  lastModifiedDateTime?: string;
+  deleted?: { state?: string };
+  file?: { mimeType?: string };
+  parentReference?: { driveId?: string };
+}
+
+export interface GraphDeltaResult {
+  items: GraphDeltaItem[];
+  deltaLink: string | null;
+  /** True when Graph file-item delta was unavailable and eTag poll was used. */
+  etagPollFallback: boolean;
+}
+
+/**
+ * Fetch Graph delta changes for a drive item.
+ * Falls back to eTag metadata poll when item delta is not supported (common for files).
+ */
+export async function getDeltaChanges(options: {
+  deltaLink?: string | null;
+  driveId: string;
+  itemId: string;
+  knownEtag?: string | null;
+}): Promise<GraphDeltaResult> {
+  const { driveId, itemId, knownEtag } = options;
+
+  if (options.deltaLink?.trim()) {
+    const page = await graphFetch<{
+      value?: GraphDeltaItem[];
+      "@odata.deltaLink"?: string;
+      "@odata.nextLink"?: string;
+    }>(options.deltaLink.trim());
+
+    let items = page.value || [];
+    let next = page["@odata.nextLink"];
+    let deltaLink = page["@odata.deltaLink"] || null;
+
+    while (next) {
+      const more = await graphFetch<{
+        value?: GraphDeltaItem[];
+        "@odata.deltaLink"?: string;
+        "@odata.nextLink"?: string;
+      }>(next);
+      items = items.concat(more.value || []);
+      next = more["@odata.nextLink"];
+      if (more["@odata.deltaLink"]) {
+        deltaLink = more["@odata.deltaLink"];
+      }
+    }
+
+    return { items, deltaLink, etagPollFallback: false };
+  }
+
+  try {
+    const page = await graphFetch<{
+      value?: GraphDeltaItem[];
+      "@odata.deltaLink"?: string;
+      "@odata.nextLink"?: string;
+    }>(`https://graph.microsoft.com/v1.0/drives/${driveId}/items/${itemId}/delta`);
+
+    let items = page.value || [];
+    let next = page["@odata.nextLink"];
+    let deltaLink = page["@odata.deltaLink"] || null;
+
+    while (next) {
+      const more = await graphFetch<{
+        value?: GraphDeltaItem[];
+        "@odata.deltaLink"?: string;
+        "@odata.nextLink"?: string;
+      }>(next);
+      items = items.concat(more.value || []);
+      next = more["@odata.nextLink"];
+      if (more["@odata.deltaLink"]) {
+        deltaLink = more["@odata.deltaLink"];
+      }
+    }
+
+    return { items, deltaLink, etagPollFallback: false };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/\(400\)|\(404\)|\(405\)/.test(message)) {
+      throw error;
+    }
+  }
+
+  // File-item delta often unsupported — poll eTag instead.
+  const item = await getItemById(driveId, itemId);
+  const changed = !knownEtag || (item.eTag && item.eTag !== knownEtag);
+  return {
+    items: changed
+      ? [
+          {
+            id: item.id,
+            name: item.name,
+            eTag: item.eTag,
+            cTag: item.cTag,
+            lastModifiedDateTime: item.lastModifiedDateTime,
+            file: item.file,
+          },
+        ]
+      : [],
+    deltaLink: null,
+    etagPollFallback: true,
+  };
+}
+
+/**
+ * Phase 2: Graph Change Notifications. Requires public HTTPS notificationUrl.
+ * No-op when GRAPH_WEBHOOK_URL / BOT_ENDPOINT is unset.
+ */
+export async function createGraphSubscription(options: {
+  notificationUrl: string;
+  resource: string;
+  clientState?: string;
+  expirationDateTime?: string;
+}): Promise<{ id: string; expirationDateTime?: string } | null> {
+  const notificationUrl = options.notificationUrl.trim();
+  if (!notificationUrl) {
+    return null;
+  }
+
+  const expirationDateTime =
+    options.expirationDateTime ||
+    new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString();
+
+  return graphFetch<{ id: string; expirationDateTime?: string }>(
+    "https://graph.microsoft.com/v1.0/subscriptions",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        changeType: "updated",
+        notificationUrl,
+        resource: options.resource,
+        expirationDateTime,
+        clientState: options.clientState || process.env.GRAPH_WEBHOOK_CLIENT_STATE || "event-bot",
+      }),
+    }
+  );
+}
+
+export async function renewGraphSubscription(
+  subscriptionId: string,
+  expirationDateTime?: string
+): Promise<{ id: string; expirationDateTime?: string } | null> {
+  if (!subscriptionId.trim()) {
+    return null;
+  }
+  const expiry =
+    expirationDateTime || new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString();
+  return graphFetch<{ id: string; expirationDateTime?: string }>(
+    `https://graph.microsoft.com/v1.0/subscriptions/${encodeURIComponent(subscriptionId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expirationDateTime: expiry }),
+    }
+  );
 }

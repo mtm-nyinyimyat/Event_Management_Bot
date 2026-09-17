@@ -26,6 +26,21 @@ export interface UpsertSharepointSourceInput {
   deltaLink?: string | null;
   etag?: string | null;
   lastModifiedAt?: Date | string | null;
+  lastDeltaSyncAt?: Date | string | null;
+}
+
+export interface RagSharepointSourceRecord {
+  documentId: string;
+  driveId: string | null;
+  itemId: string | null;
+  siteId: string | null;
+  webUrl: string | null;
+  subscriptionId: string | null;
+  subscriptionExpiresAt: string | null;
+  deltaLink: string | null;
+  etag: string | null;
+  lastModifiedAt: string | null;
+  lastDeltaSyncAt: string | null;
 }
 
 let schemaReady: Promise<void> | null = null;
@@ -74,9 +89,22 @@ export async function ensureDocumentSchema(): Promise<void> {
           delta_link TEXT,
           etag TEXT,
           last_modified_at TIMESTAMPTZ,
+          last_delta_sync_at TIMESTAMPTZ,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
       `);
+
+      const deltaSyncCol = await pool.query(`
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'rag_sharepoint_sources' AND column_name = 'last_delta_sync_at'
+        LIMIT 1
+      `);
+      if (deltaSyncCol.rows.length === 0) {
+        await pool.query(`
+          ALTER TABLE rag_sharepoint_sources
+          ADD COLUMN last_delta_sync_at TIMESTAMPTZ
+        `);
+      }
 
       await pool.query(`
         CREATE UNIQUE INDEX IF NOT EXISTS uq_rag_sharepoint_drive_item
@@ -275,13 +303,14 @@ export async function upsertSharepointSource(
   await getPostgresPool().query(
     `INSERT INTO rag_sharepoint_sources (
        document_id, drive_id, item_id, site_id, web_url,
-       subscription_id, subscription_expires_at, delta_link, etag, last_modified_at, updated_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+       subscription_id, subscription_expires_at, delta_link, etag, last_modified_at,
+       last_delta_sync_at, updated_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
      ON CONFLICT (document_id) DO UPDATE SET
-       drive_id = EXCLUDED.drive_id,
-       item_id = EXCLUDED.item_id,
-       site_id = EXCLUDED.site_id,
-       web_url = EXCLUDED.web_url,
+       drive_id = COALESCE(EXCLUDED.drive_id, rag_sharepoint_sources.drive_id),
+       item_id = COALESCE(EXCLUDED.item_id, rag_sharepoint_sources.item_id),
+       site_id = COALESCE(EXCLUDED.site_id, rag_sharepoint_sources.site_id),
+       web_url = COALESCE(EXCLUDED.web_url, rag_sharepoint_sources.web_url),
        subscription_id = COALESCE(EXCLUDED.subscription_id, rag_sharepoint_sources.subscription_id),
        subscription_expires_at = COALESCE(
          EXCLUDED.subscription_expires_at, rag_sharepoint_sources.subscription_expires_at
@@ -290,6 +319,9 @@ export async function upsertSharepointSource(
        etag = COALESCE(EXCLUDED.etag, rag_sharepoint_sources.etag),
        last_modified_at = COALESCE(
          EXCLUDED.last_modified_at, rag_sharepoint_sources.last_modified_at
+       ),
+       last_delta_sync_at = COALESCE(
+         EXCLUDED.last_delta_sync_at, rag_sharepoint_sources.last_delta_sync_at
        ),
        updated_at = NOW()`,
     [
@@ -303,6 +335,69 @@ export async function upsertSharepointSource(
       input.deltaLink ?? null,
       input.etag ?? null,
       input.lastModifiedAt ?? null,
+      input.lastDeltaSyncAt ?? null,
     ]
   );
+}
+
+function mapSharepointSource(row: {
+  document_id: string;
+  drive_id: string | null;
+  item_id: string | null;
+  site_id: string | null;
+  web_url: string | null;
+  subscription_id: string | null;
+  subscription_expires_at: Date | string | null;
+  delta_link: string | null;
+  etag: string | null;
+  last_modified_at: Date | string | null;
+  last_delta_sync_at: Date | string | null;
+}): RagSharepointSourceRecord {
+  return {
+    documentId: row.document_id,
+    driveId: row.drive_id,
+    itemId: row.item_id,
+    siteId: row.site_id,
+    webUrl: row.web_url,
+    subscriptionId: row.subscription_id,
+    subscriptionExpiresAt: row.subscription_expires_at
+      ? String(row.subscription_expires_at)
+      : null,
+    deltaLink: row.delta_link,
+    etag: row.etag,
+    lastModifiedAt: row.last_modified_at ? String(row.last_modified_at) : null,
+    lastDeltaSyncAt: row.last_delta_sync_at ? String(row.last_delta_sync_at) : null,
+  };
+}
+
+/** Active SharePoint-backed documents linked to an active event session. */
+export async function listActiveSharepointSources(): Promise<RagSharepointSourceRecord[]> {
+  await ensureDocumentSchema();
+  const result = await getPostgresPool().query(
+    `SELECT s.document_id, s.drive_id, s.item_id, s.site_id, s.web_url,
+            s.subscription_id, s.subscription_expires_at, s.delta_link, s.etag,
+            s.last_modified_at, s.last_delta_sync_at
+     FROM rag_sharepoint_sources s
+     INNER JOIN rag_documents d ON d.id = s.document_id
+     INNER JOIN event_sessions e ON e.document_id = s.document_id
+     WHERE e.status = 'active'
+       AND d.status IN ('ready', 'syncing', 'error')
+       AND s.drive_id IS NOT NULL
+       AND s.item_id IS NOT NULL`
+  );
+  return result.rows.map(mapSharepointSource);
+}
+
+export async function getSharepointSource(
+  documentId: string
+): Promise<RagSharepointSourceRecord | null> {
+  await ensureDocumentSchema();
+  const result = await getPostgresPool().query(
+    `SELECT document_id, drive_id, item_id, site_id, web_url,
+            subscription_id, subscription_expires_at, delta_link, etag,
+            last_modified_at, last_delta_sync_at
+     FROM rag_sharepoint_sources WHERE document_id = $1`,
+    [documentId]
+  );
+  return result.rows[0] ? mapSharepointSource(result.rows[0]) : null;
 }
