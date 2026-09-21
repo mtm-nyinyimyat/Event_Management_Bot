@@ -32,6 +32,7 @@ import {
   startEventSession,
 } from "./events/eventSession";
 import { startDeltaPolling } from "./events/deltaSync";
+import { ensureGraphAuthReady, getGraphAuthMode } from "./events/graphAuth";
 import { IDatabase } from "./storage/database";
 import { StorageFactory } from "./storage/storageFactory";
 import { logModelConfigs, validateEnvironment } from "./utils/config";
@@ -482,6 +483,13 @@ app.on("install.add", async ({ send }) => {
     logger.debug(
       `📎 Event ingest mode: ${getEventIngestMode()} (set EVENTS_INGEST_MODE=sharepoint to use SharePoint URLs)`
     );
+    if (
+      getGraphAuthMode() === "delegated" &&
+      (getEventIngestMode() === "sharepoint" || Boolean(process.env.EVENTS_GRAPH_DRIVE_ID?.trim()))
+    ) {
+      logger.debug("Graph delegated auth: waiting for personal OneDrive device login if needed");
+      await ensureGraphAuthReady((message) => logger.debug(message));
+    }
     logger.debug("✅ Storage initialized successfully");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -1,4 +1,4 @@
-import { ClientSecretCredential } from "@azure/identity";
+import { getGraphAccessToken } from "./graphAuth";
 
 export interface GraphDriveItem {
   id: string;
@@ -43,27 +43,22 @@ function requireEnv(name: string): string {
   return value;
 }
 
-function getCredential(): ClientSecretCredential {
-  const tenantId = process.env.TENANT_ID || process.env.GRAPH_TENANT_ID;
-  const clientId = process.env.CLIENT_ID || process.env.GRAPH_CLIENT_ID;
-  const clientSecret = process.env.CLIENT_SECRET || process.env.GRAPH_CLIENT_SECRET;
-
-  if (!tenantId || !clientId || !clientSecret) {
-    throw new Error(
-      "Graph Excel access needs TENANT_ID, CLIENT_ID, and CLIENT_SECRET (bot app registration)."
-    );
-  }
-
-  return new ClientSecretCredential(tenantId, clientId, clientSecret);
+async function getGraphToken(): Promise<string> {
+  return getGraphAccessToken();
 }
 
-async function getGraphToken(): Promise<string> {
-  const credential = getCredential();
-  const token = await credential.getToken("https://graph.microsoft.com/.default");
-  if (!token?.token) {
-    throw new Error("Failed to acquire Microsoft Graph access token");
+/** "me" / "personal" means the signed-in user's OneDrive, not a literal drive id. */
+async function resolveUserDriveId(configured: string): Promise<string> {
+  if (!/^(me|personal|onedrive)$/i.test(configured.trim())) {
+    return configured.trim();
   }
-  return token.token;
+  const drive = await graphFetch<{ id: string }>(
+    "https://graph.microsoft.com/v1.0/me/drive?$select=id"
+  );
+  if (!drive?.id) {
+    throw new Error("Could not resolve personal OneDrive (/me/drive). Complete device login first.");
+  }
+  return drive.id;
 }
 
 async function graphFetch<T>(url: string, init?: RequestInit): Promise<T> {
@@ -323,8 +318,9 @@ async function resolveSiteId(): Promise<string> {
 }
 
 async function resolveDriveId(siteId: string): Promise<string> {
-  if (process.env.EVENTS_GRAPH_DRIVE_ID?.trim()) {
-    return process.env.EVENTS_GRAPH_DRIVE_ID.trim();
+  const configured = process.env.EVENTS_GRAPH_DRIVE_ID?.trim();
+  if (configured) {
+    return resolveUserDriveId(configured);
   }
 
   const drive = await graphFetch<{ id: string }>(

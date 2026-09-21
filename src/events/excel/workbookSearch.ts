@@ -112,7 +112,75 @@ function expandQueryForRetrieval(query: string): string {
   if (/\b(drink|beverage|beer|juice|cocktail)\b/.test(q)) {
     extras.push("Beverage", "BEER", "JUICE");
   }
+  if (
+    /\b(who|whom|whose|people|person|member|members|participant|participants)\b/.test(q) ||
+    q.includes("ဘယ်သူ") ||
+    q.includes("သူတွေ") ||
+    q.includes("အဖွဲ့ဝင်") ||
+    q.includes("ပါဝင်")
+  ) {
+    extras.push("Members", "Member name", "Name", "Group");
+  }
   return extras.length ? `${query} ${extras.join(" ")}` : query;
+}
+
+function isWhoQuery(query: string): boolean {
+  const q = normalizeText(query);
+  return (
+    /\b(who|whom|whose|people|person|member|members|participant|participants)\b/.test(q) ||
+    q.includes("ဘယ်သူ") ||
+    q.includes("သူတွေ") ||
+    q.includes("အဖွဲ့ဝင်") ||
+    q.includes("ပါဝင်")
+  );
+}
+
+function looksLikeInventoryValue(value: string): boolean {
+  const text = value.trim();
+  if (!text) {
+    return false;
+  }
+  return (
+    /=>/.test(text) ||
+    /:\s*\d/.test(text) ||
+    /\b(buy|dress|yukata|sakura|maypal)\b/i.test(text) ||
+    /ပန်ဖို့|ခြေအိတ်|ဆံထုံး|အကျီ|ပုဆိုး/.test(text)
+  );
+}
+
+function rowLooksLikePersonFact(row: EventRecord): boolean {
+  if (row.Members || row["Member name"] || row.Name || row.NAME) {
+    return true;
+  }
+  const value = row.Value || "";
+  if (!value) {
+    return Object.keys(row).some((key) => /name|member|leader/i.test(key));
+  }
+  return !looksLikeInventoryValue(value);
+}
+
+/** For "who is in X" questions, keep people rows and drop costume/rental line-items. */
+function preferPeopleRows(sheets: SheetData[], query: string): SheetData[] {
+  if (!isWhoQuery(query)) {
+    return sheets;
+  }
+  return sheets
+    .map((sheet) => {
+      const people = sheet.rows.filter((row) => {
+        if (row.__chunk_type === "summary") {
+          return false;
+        }
+        if (looksLikeInventoryValue(row.Value || "")) {
+          return false;
+        }
+        return rowLooksLikePersonFact(row);
+      });
+      if (!people.length) {
+        return { ...sheet, rows: [], numbered_item_count: 0, summary: undefined };
+      }
+      return { ...sheet, rows: people, numbered_item_count: people.length, summary: undefined };
+    })
+    .filter((sheet) => sheet.rows.length > 0);
 }
 
 function isSelfReferenceQuery(query: string): boolean {
@@ -300,16 +368,19 @@ async function searchWorkbookUncached(
       );
 
       if (rag.sheets.length > 0 || rag.hits.length > 0) {
-        const detailSheets = rag.sheets.map((sheet) => {
-          const rows = sheet.rows.slice(0, limit);
-          const hasDetailRows = rows.some((row) => row.__chunk_type !== "summary");
-          return {
-            sheet: sheet.sheet,
-            numbered_item_count: hasDetailRows ? rows.length : sheet.numbered_item_count,
-            summary: hasDetailRows ? undefined : sheet.summary,
-            rows,
-          };
-        });
+        const detailSheets = preferPeopleRows(
+          rag.sheets.map((sheet) => {
+            const rows = sheet.rows.slice(0, limit);
+            const hasDetailRows = rows.some((row) => row.__chunk_type !== "summary");
+            return {
+              sheet: sheet.sheet,
+              numbered_item_count: hasDetailRows ? rows.length : sheet.numbered_item_count,
+              summary: hasDetailRows ? undefined : sheet.summary,
+              rows,
+            };
+          }),
+          retrievalQuery
+        );
         return {
           source,
           source_type: sourceType,
@@ -380,23 +451,27 @@ async function searchWorkbookUncached(
     sheets.push(withSheetStats(sheet, rows.slice(0, limit), { omitSummary: true }));
   }
 
+  const peopleSheets = preferPeopleRows(sheets, retrievalQuery);
+  const finalSheets = isWhoQuery(retrievalQuery) ? peopleSheets : sheets;
+  const finalMatchCount = finalSheets.reduce((sum, sheet) => sum + sheet.rows.length, 0);
+
   return {
     source,
     source_type: sourceType,
     file_name: fileName,
     total_rows: totalRows,
-    match_count: matchCount,
+    match_count: isWhoQuery(retrievalQuery) ? finalMatchCount : matchCount,
     retrieval: "lexical",
     rag: {
       enabled: ragConfig.enabled,
       provider: ragConfig.embedding.provider,
       top_k: ragConfig.topK,
-      hit_count: matchCount,
+      hit_count: isWhoQuery(retrievalQuery) ? finalMatchCount : matchCount,
     },
     answer_hint:
-      answerHintForQuery(retrievalQuery, sheets) ||
+      answerHintForQuery(retrievalQuery, finalSheets) ||
       "Answer only from the matched rows. Do not invent values not present.",
-    sheets,
+    sheets: finalSheets,
   };
 }
 

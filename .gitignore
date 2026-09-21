@@ -23,3 +23,6 @@ dist/
 
 # Persisted chat Excel upload cache
 data/.last-chat-upload.json
+
+# Delegated Graph device-login token cache
+.graph-token-cache.json

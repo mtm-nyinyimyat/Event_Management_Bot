@@ -35,6 +35,8 @@ export interface CachedWorkbook {
   fileName?: string;
   sheets: SheetData[];
   loadedAt: number;
+  /** Bump when sheet parsing changes so stale JSON caches are re-downloaded. */
+  parseVersion?: number;
 }
 
 export interface WorkbookLookupOptions {

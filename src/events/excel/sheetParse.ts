@@ -21,23 +21,35 @@ function rowHasValue(row: unknown[]): boolean {
   return (row || []).some((cell) => cellToString(cell));
 }
 
-function looksLikeHeaderRow(row: unknown[]): boolean {
-  const cells = (row || []).map((cell) => cellToString(cell).toLocaleLowerCase("my"));
-  const nonEmpty = cells.filter(Boolean);
-  if (nonEmpty.length < 2) {
+function isHeaderLabel(cell: string): boolean {
+  const value = cell.trim();
+  if (!value || value.length > 48) {
     return false;
   }
-  // Prefer rows that look like labels (short tokens, shared header words)
-  const headerish = nonEmpty.filter(
-    (cell) =>
-      cell.length <= 40 &&
-      !/^\d+(\.\d+)?$/.test(cell) &&
-      (/\b(no\.?|name|time|detail|description|location|table|ferry|beverage|remark)\b/i.test(
-        cell
-      ) ||
-        cell.split(/\s+/).length <= 4)
-  ).length;
-  return headerish >= 2 || cells[0] === "no." || cells[0] === "no";
+  // Times, durations, and plain numbers are data, not column titles.
+  if (/^\d/.test(value) || /mins?\b/i.test(value) || value.includes("~") || value.includes(":")) {
+    return false;
+  }
+  return (
+    /^(no\.?|name|member name|members|team leader name|date|start time|end time|detail|description|location|remark|period|time|table|beverage|role|gps point|dev)$/i.test(
+      value
+    ) ||
+    value === "ကြာချိန်" ||
+    /volunteer|reference|participate/i.test(value)
+  );
+}
+
+function looksLikeHeaderRow(row: unknown[]): boolean {
+  const cells = (row || []).map((cell) => cellToString(cell)).filter(Boolean);
+  if (cells.length < 2) {
+    return false;
+  }
+  const labels = cells.filter(isHeaderLabel);
+  const first = cellToString((row || [])[0]).toLocaleLowerCase("my");
+  if ((first === "no." || first === "no") && labels.length >= 2) {
+    return true;
+  }
+  return labels.length >= 3;
 }
 
 function isNumbered(value: string | undefined): boolean {
@@ -79,12 +91,243 @@ function fieldOrderFromRows(rows: EventRecord[]): string[] {
   return order;
 }
 
-/** Generic matrix → records for any workbook layout. */
-export function matrixToRecords(values: unknown[][]): EventRecord[] {
-  if (!values?.length) {
-    return [];
+function nonEmptyCells(row: unknown[]): Array<{ index: number; text: string }> {
+  const out: Array<{ index: number; text: string }> = [];
+  (row || []).forEach((cell, index) => {
+    const text = cellToString(cell);
+    if (text) {
+      out.push({ index, text });
+    }
+  });
+  return out;
+}
+
+/** True when a header row repeats the same field labels in side-by-side blocks. */
+function findRepeatedFieldBlocks(
+  headerRow: unknown[]
+): Array<{ start: number; end: number; fields: string[] }> | null {
+  const width = Math.max((headerRow || []).length, 1);
+  const blocks: Array<{ start: number; end: number; fields: string[] }> = [];
+  let cursor = 0;
+
+  while (cursor < width) {
+    while (cursor < width && !cellToString(headerRow[cursor])) {
+      cursor += 1;
+    }
+    if (cursor >= width) {
+      break;
+    }
+    const start = cursor;
+    const fields: string[] = [];
+    while (cursor < width) {
+      const text = cellToString(headerRow[cursor]);
+      if (!text) {
+        break;
+      }
+      fields.push(text);
+      cursor += 1;
+    }
+    if (fields.length) {
+      blocks.push({ start, end: cursor, fields });
+    }
   }
 
+  if (blocks.length < 2) {
+    return null;
+  }
+
+  const signatures = blocks.map((block) =>
+    block.fields.map((field) => field.toLocaleLowerCase("my")).join("|")
+  );
+  const first = signatures[0];
+  const matching = signatures.filter((signature) => signature === first).length;
+  if (matching < 2) {
+    return null;
+  }
+  if (!blocks[0].fields.some((field) => isHeaderLabel(field))) {
+    return null;
+  }
+  return blocks;
+}
+
+function sectionTitleForBlock(
+  titleRow: unknown[] | undefined,
+  blockStart: number,
+  blockEnd: number,
+  previousEnd: number
+): string {
+  if (!titleRow) {
+    return "";
+  }
+  const titled = nonEmptyCells(titleRow).filter(
+    (cell) => cell.index >= previousEnd && cell.index < blockEnd
+  );
+  if (titled.length) {
+    return titled[0].text;
+  }
+  const anyInBlock = nonEmptyCells(titleRow).find(
+    (cell) => cell.index >= blockStart && cell.index < blockEnd
+  );
+  return anyInBlock?.text || "";
+}
+
+/**
+ * Side-by-side subtables: a sparse group-title row, then a repeated Date/Members/... header row.
+ * Emits one record per group block per data row.
+ */
+function matrixToSectionedRecords(values: unknown[][]): EventRecord[] | null {
+  if (values.length < 3) {
+    return null;
+  }
+
+  for (let headerIndex = 1; headerIndex < Math.min(values.length, 6); headerIndex += 1) {
+    const blocks = findRepeatedFieldBlocks(values[headerIndex] || []);
+    if (!blocks) {
+      continue;
+    }
+
+    const titleRow = values[headerIndex - 1];
+    const titleCells = nonEmptyCells(titleRow || []);
+    if (titleCells.length < 2) {
+      continue;
+    }
+
+    const records: EventRecord[] = [];
+    let emptyStreak = 0;
+
+    for (let r = headerIndex + 1; r < values.length; r += 1) {
+      const row = values[r] || [];
+      if (!rowHasValue(row)) {
+        emptyStreak += 1;
+        if (emptyStreak >= 8) {
+          break;
+        }
+        continue;
+      }
+      emptyStreak = 0;
+
+      let previousEnd = 0;
+      for (const block of blocks) {
+        const group = sectionTitleForBlock(titleRow, block.start, block.end, previousEnd);
+        previousEnd = block.end;
+        const record: EventRecord = {};
+        if (group) {
+          record.Group = group;
+        }
+        let hasValue = false;
+        block.fields.forEach((field, offset) => {
+          const text = cellToString(row[block.start + offset]);
+          if (text) {
+            record[field] = text;
+            hasValue = true;
+          }
+        });
+        if (hasValue) {
+          records.push(record);
+        }
+      }
+    }
+
+    return records.length ? records : null;
+  }
+
+  return null;
+}
+
+/**
+ * Parallel independent columns (dance groups, purchase lists): one header cell per group,
+ * values underneath are separate facts — never mash sibling columns into one row.
+ */
+function matrixToColumnListRecords(values: unknown[][]): EventRecord[] | null {
+  if (values.length < 2) {
+    return null;
+  }
+
+  let headerIndex = values.findIndex((row) => rowHasValue(row));
+  if (headerIndex < 0) {
+    return null;
+  }
+
+  // Prefer a later classic header row when present (normal tables).
+  const classicHeader = values.findIndex((row) => looksLikeHeaderRow(row));
+  if (classicHeader >= 0 && findRepeatedFieldBlocks(values[classicHeader] || [])) {
+    return null;
+  }
+  if (classicHeader === headerIndex) {
+    return null;
+  }
+  if (classicHeader > headerIndex) {
+    // Title row + classic single table — not a parallel list.
+    const titleCount = nonEmptyCells(values[headerIndex] || []).length;
+    if (titleCount <= 1) {
+      return null;
+    }
+  }
+
+  const headerRow = values[headerIndex] || [];
+  const headers = nonEmptyCells(headerRow);
+  if (headers.length < 2) {
+    return null;
+  }
+
+  // Classic single-entity tables keep No./Name style headers in one row.
+  const classicLabels = headers.filter((cell) => isHeaderLabel(cell.text)).length;
+  if (classicLabels >= 2) {
+    return null;
+  }
+
+  // Build column ranges: each named header owns cells until the next named header.
+  const columns = headers.map((header, index) => {
+    const next = headers[index + 1];
+    return {
+      group: header.text,
+      start: header.index,
+      end: next ? next.index : Math.max(headerRow.length, header.index + 1),
+    };
+  });
+
+  const records: EventRecord[] = [];
+  let emptyStreak = 0;
+
+  for (let r = headerIndex + 1; r < values.length; r += 1) {
+    const row = values[r] || [];
+    if (!rowHasValue(row)) {
+      emptyStreak += 1;
+      if (emptyStreak >= 8) {
+        break;
+      }
+      continue;
+    }
+    emptyStreak = 0;
+
+    for (const column of columns) {
+      const valuesInColumn: string[] = [];
+      for (let c = column.start; c < column.end; c += 1) {
+        const text = cellToString(row[c]);
+        if (text) {
+          valuesInColumn.push(text);
+        }
+      }
+      if (!valuesInColumn.length) {
+        continue;
+      }
+
+      // First cell is the primary value; extra adjacent cells become Detail/Days/etc.
+      const record: EventRecord = {
+        Group: column.group,
+        Value: valuesInColumn[0],
+      };
+      if (valuesInColumn.length > 1) {
+        record.Detail = valuesInColumn.slice(1).join(" | ");
+      }
+      records.push(record);
+    }
+  }
+
+  return records.length >= headers.length ? records : null;
+}
+
+function matrixToFlatRecords(values: unknown[][]): EventRecord[] {
   let headerIndex = values.findIndex((row) => looksLikeHeaderRow(row));
   if (headerIndex < 0) {
     headerIndex = values.findIndex((row) => rowHasValue(row));
@@ -119,10 +362,6 @@ export function matrixToRecords(values: unknown[][]): EventRecord[] {
     }
     emptyStreak = 0;
 
-    if (looksLikeHeaderRow(row)) {
-      continue;
-    }
-
     const record: EventRecord = {};
     headers.forEach((header, column) => {
       if (!header || header.startsWith("__EMPTY") || header.startsWith("Column_")) {
@@ -142,6 +381,25 @@ export function matrixToRecords(values: unknown[][]): EventRecord[] {
   return records;
 }
 
+/** Generic matrix → records for any workbook layout. */
+export function matrixToRecords(values: unknown[][]): EventRecord[] {
+  if (!values?.length) {
+    return [];
+  }
+
+  const sectioned = matrixToSectionedRecords(values);
+  if (sectioned) {
+    return sectioned;
+  }
+
+  const columnLists = matrixToColumnListRecords(values);
+  if (columnLists) {
+    return columnLists;
+  }
+
+  return matrixToFlatRecords(values);
+}
+
 function defaultSummaryForRows(sheetName: string, rows: EventRecord[]): SheetSummary {
   const numbered = rows.filter((row) => isNumbered(row["No."] || row.No));
   const columns = fieldOrderFromRows(rows).slice(0, 24);
@@ -152,7 +410,6 @@ function defaultSummaryForRows(sheetName: string, rows: EventRecord[]): SheetSum
   if (columns.length) {
     summary.columns = columns.join(", ");
   }
-  // Soft hints only when sheet title suggests it — not required for retrieval
   if (/agenda|schedule|program/i.test(sheetName)) {
     summary.agenda_items = numbered.length;
   }

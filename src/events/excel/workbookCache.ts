@@ -3,6 +3,7 @@ import path from "path";
 import type { CachedWorkbook } from "./types";
 
 const UPLOAD_PERSIST_PATH = path.join(process.cwd(), "data", ".last-chat-upload.json");
+const PARSE_VERSION = 3;
 
 let workbookCache: CachedWorkbook | null = null;
 let sharedUploadedWorkbook: CachedWorkbook | null = null;
@@ -39,7 +40,7 @@ function tryRestorePersistedUpload(): void {
   }
   try {
     const raw = JSON.parse(fs.readFileSync(UPLOAD_PERSIST_PATH, "utf8")) as CachedWorkbook;
-    if (raw?.sheets?.length && raw.sourceType === "upload") {
+    if (raw?.sheets?.length && raw.sourceType === "upload" && raw.parseVersion === PARSE_VERSION) {
       sharedUploadedWorkbook = raw;
     }
   } catch {
@@ -53,7 +54,8 @@ export function persistSharedUpload(workbook: CachedWorkbook): void {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-    fs.writeFileSync(UPLOAD_PERSIST_PATH, JSON.stringify(workbook));
+    const payload: CachedWorkbook = { ...workbook, parseVersion: PARSE_VERSION };
+    fs.writeFileSync(UPLOAD_PERSIST_PATH, JSON.stringify(payload));
   } catch {
     // non-fatal
   }

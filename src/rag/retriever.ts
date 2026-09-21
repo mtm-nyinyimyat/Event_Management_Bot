@@ -74,7 +74,7 @@ function significantTerms(query: string): string[] {
   return normalizeText(query)
     .split(/\s+/)
     .map((term) => term.trim())
-    .filter((term) => term.length > 0 && !stop.has(term))
+    .filter((term) => term.length > 1 && !stop.has(term))
     .flatMap((term) => {
       if (term.length > 4 && term.endsWith("s") && !term.endsWith("ss")) {
         return [term, term.slice(0, -1)];
@@ -293,7 +293,14 @@ export async function retrieveHybrid(
 
   const ranked = [...merged.values()]
     .filter((hit) => hit.score >= config.minScore || hit.lexicalScore >= 0.55)
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => {
+      const aStrong = a.lexicalScore >= 0.55 ? 1 : 0;
+      const bStrong = b.lexicalScore >= 0.55 ? 1 : 0;
+      if (aStrong !== bStrong) {
+        return bStrong - aStrong;
+      }
+      return b.score - a.score;
+    })
     .slice(0, topK);
 
   const bySheet = new Map<
