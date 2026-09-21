@@ -392,6 +392,7 @@ export function validateEnvironment(logger: ILogger): void {
   logger.debug(
     `🔎 RAG enabled (provider=${rag.embedding.provider}, model=${rag.embedding.model}, topK=${rag.topK})`
   );
+  logger.debug("📄 Event Excel mode: generic ingest + hybrid RAG + LLM");
 
   if (DATABASE_CONFIG.type === "postgres") {
     if (!isPostgresConfigured()) {

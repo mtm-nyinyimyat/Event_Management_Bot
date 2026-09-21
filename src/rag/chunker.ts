@@ -1,6 +1,8 @@
 import type { SheetData } from "../events/excelStore";
 import type { RagChunk } from "./types";
 
+const MAX_CHUNK_CHARS = 1_200;
+
 /** Skip parser/internal noise keys; keep every real column from the workbook. */
 function isNoiseKey(key: string): boolean {
   if (!key || key.startsWith("__")) {
@@ -83,6 +85,13 @@ export function dynamicRow(row: Record<string, string>): Record<string, string> 
   return out;
 }
 
+function truncateChunkText(text: string): string {
+  if (text.length <= MAX_CHUNK_CHARS) {
+    return text;
+  }
+  return `${text.slice(0, MAX_CHUNK_CHARS - 1)}…`;
+}
+
 function summaryToText(sheet: string, summary: SheetData["summary"]): string | null {
   if (!summary || Object.keys(summary).length === 0) {
     return null;
@@ -98,12 +107,13 @@ function summaryToText(sheet: string, summary: SheetData["summary"]): string | n
     return `${key}: ${value}`;
   });
 
-  return `Sheet: ${sheet} | Summary: ${parts.join(" | ")}`;
+  return truncateChunkText(`Sheet: ${sheet} | Summary: ${parts.join(" | ")}`);
 }
 
 /**
  * Turn workbook sheets into retrieval chunks (one per row + optional summary chunk).
  * Column names come from the file rows, not a fixed schema.
+ * Free-text notice rows are chunked the same way so schedule notes remain searchable.
  */
 export function chunkWorkbookSheets(sheets: SheetData[]): RagChunk[] {
   const chunks: RagChunk[] = [];
@@ -120,16 +130,24 @@ export function chunkWorkbookSheets(sheets: SheetData[]): RagChunk[] {
     }
 
     const fieldOrder = fieldOrderFromRows(sheet.rows);
+    const headerContext = fieldOrder.length
+      ? `Columns: ${fieldOrder.slice(0, 16).join(", ")}`
+      : "";
 
     sheet.rows.forEach((row, index) => {
       const body = fieldsFromRow(row, fieldOrder);
       if (!body) {
         return;
       }
+      const text = truncateChunkText(
+        headerContext
+          ? `Sheet: ${sheet.sheet} | ${headerContext} | ${body}`
+          : `Sheet: ${sheet.sheet} | ${body}`
+      );
       chunks.push({
         id: `${sheet.sheet}::row::${index}`,
         sheet: sheet.sheet,
-        text: `Sheet: ${sheet.sheet} | ${body}`,
+        text,
         row: dynamicRow(row),
       });
     });

@@ -40,7 +40,7 @@ function looksLikeOffTopic(text: string): boolean {
       t
     );
   const eventHints =
-    /\b(participant|agenda|volunteer|ferry|seat|table|menu|beverage|beer|juice|cocktail|karaoke|event|party|driver|dish|appetizer|schedule|who|how many|where)\b|ပါဝင်|အစီအစဉ်|ဖယ်ရီ|စားပွဲ|မီနူး/i.test(
+    /\b(participant|attendee|agenda|volunteer|ferry|seat|table|menu|beverage|drink|beer|juice|cocktail|karaoke|event|party|driver|dish|schedule|presenter|sing|when|who|how many|where|what)\b|ပါဝင်|အစီအစဉ်|ဖယ်ရီ|စားပွဲ|မီနူး|ရုံး|ထွက်/i.test(
       t
     );
   return offTopic && !eventHints;

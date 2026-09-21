@@ -30,10 +30,19 @@ function significantTerms(query: string): string[] {
     "an",
     "all",
     "are",
+    "can",
+    "could",
     "count",
+    "did",
+    "do",
+    "does",
+    "find",
     "for",
     "give",
+    "goes",
+    "going",
     "how",
+    "i",
     "in",
     "is",
     "item",
@@ -41,21 +50,53 @@ function significantTerms(query: string): string[] {
     "list",
     "many",
     "me",
+    "my",
     "of",
     "please",
+    "should",
     "show",
+    "tell",
     "the",
     "them",
+    "to",
     "total",
     "what",
+    "when",
+    "where",
+    "which",
     "who",
+    "whose",
+    "will",
+    "would",
     "about",
   ]);
 
   return normalizeText(query)
     .split(/\s+/)
     .map((term) => term.trim())
-    .filter((term) => term.length > 0 && !stop.has(term));
+    .filter((term) => term.length > 0 && !stop.has(term))
+    .flatMap((term) => {
+      if (term.length > 4 && term.endsWith("s") && !term.endsWith("ss")) {
+        return [term, term.slice(0, -1)];
+      }
+      return [term];
+    })
+    .filter((term, index, all) => all.indexOf(term) === index);
+}
+
+function termInHaystack(haystack: string, term: string): boolean {
+  const normalizedHaystack = normalizeText(haystack);
+  const normalizedTerm = normalizeText(term).trim();
+  if (!normalizedTerm) {
+    return true;
+  }
+  if (normalizedHaystack === normalizedTerm) {
+    return true;
+  }
+  const escaped = normalizedTerm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}_])${escaped}(?:[^\\p{L}\\p{N}_]|$)`, "u").test(
+    normalizedHaystack
+  );
 }
 
 function lexicalScore(text: string, query: string): number {
@@ -65,7 +106,7 @@ function lexicalScore(text: string, query: string): number {
     return 0;
   }
 
-  if (haystack.includes(normalizedQuery)) {
+  if (termInHaystack(haystack, normalizedQuery)) {
     return 1;
   }
 
@@ -74,7 +115,7 @@ function lexicalScore(text: string, query: string): number {
     return 0;
   }
 
-  const hits = terms.filter((term) => haystack.includes(term)).length;
+  const hits = terms.filter((term) => termInHaystack(haystack, term)).length;
   return hits / terms.length;
 }
 
@@ -251,7 +292,7 @@ export async function retrieveHybrid(
   }
 
   const ranked = [...merged.values()]
-    .filter((hit) => hit.score >= config.minScore || hit.lexicalScore >= 0.5)
+    .filter((hit) => hit.score >= config.minScore || hit.lexicalScore >= 0.55)
     .sort((a, b) => b.score - a.score)
     .slice(0, topK);
 

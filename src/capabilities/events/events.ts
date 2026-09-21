@@ -74,7 +74,7 @@ export class EventsCapability extends BaseCapability {
 
 export const EVENTS_CAPABILITY_DEFINITION: CapabilityDefinition = {
   name: "events",
-  manager_desc: `**events**: ONLY capability for event Excel Q&A. Use for questions about the active event file (English or Burmese): participants, agenda, volunteers, ferry, seating, menu, beverages, karaoke. Do NOT use for general knowledge. If the user question is unrelated to that file, do not delegate — refuse with the event-file-only message.`,
+  manager_desc: `**events**: ONLY capability for the active event Excel Q&A (any sheet/column layout). Use for questions about that file in English or Burmese. Do NOT use for general knowledge. If unrelated to the active event file, do not delegate — refuse with the event-file-only message.`,
   handler: async (context: MessageContext, logger: ILogger) => {
     const capability = new EventsCapability(logger);
     const result = await capability.processRequest(context);

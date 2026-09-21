@@ -64,9 +64,9 @@ export function getEmbeddingConfig(): EmbeddingConfig {
 }
 
 export function getRagConfig(): RagRuntimeConfig {
-  const topK = Number(process.env.RAG_TOP_K || 6);
-  const hybridAlpha = Number(process.env.RAG_HYBRID_ALPHA || 0.65);
-  const minScore = Number(process.env.RAG_MIN_SCORE || 0.12);
+  const topK = Number(process.env.RAG_TOP_K || 8);
+  const hybridAlpha = Number(process.env.RAG_HYBRID_ALPHA || 0.6);
+  const minScore = Number(process.env.RAG_MIN_SCORE || 0.18);
   const enabledRaw = process.env.RAG_ENABLED;
   const enabled =
     enabledRaw === undefined || enabledRaw === ""
@@ -75,9 +75,9 @@ export function getRagConfig(): RagRuntimeConfig {
 
   return {
     enabled,
-    topK: Number.isFinite(topK) ? Math.max(1, Math.min(topK, 50)) : 6,
-    hybridAlpha: Number.isFinite(hybridAlpha) ? Math.min(1, Math.max(0, hybridAlpha)) : 0.65,
-    minScore: Number.isFinite(minScore) ? minScore : 0.12,
+    topK: Number.isFinite(topK) ? Math.max(1, Math.min(topK, 50)) : 8,
+    hybridAlpha: Number.isFinite(hybridAlpha) ? Math.min(1, Math.max(0, hybridAlpha)) : 0.6,
+    minScore: Number.isFinite(minScore) ? minScore : 0.18,
     embedding: getEmbeddingConfig(),
   };
 }
