@@ -23,11 +23,18 @@ export class EventsCapability extends BaseCapability {
       "Search the event Excel workbook with hybrid RAG (semantic + keyword) and return summaries plus matching rows",
       LOOKUP_EVENTS_SCHEMA,
       async ({ query, max_results }: LookupEventsArgs) => {
+        // Keep the user's original text (often Burmese names) so lookup can
+        // resolve them to Excel English NAME values — do not rely on the model
+        // to romanize correctly.
+        const lookupQuery = [query || "", context.text || ""]
+          .map((part) => part.trim())
+          .filter(Boolean)
+          .join(" ");
         this.logger.debug(
-          `📊 lookup_events query="${query || ""}" sender="${senderName}"`
+          `📊 lookup_events query="${lookupQuery}" sender="${senderName}"`
         );
         try {
-          const result = await searchWorkbook(query || "", max_results ?? 20, {
+          const result = await searchWorkbook(lookupQuery, max_results ?? 20, {
             conversationId: context.activeEventConversationId || context.conversationId,
             documentId: context.activeEventDocumentId,
             userId: context.userId,
@@ -35,7 +42,7 @@ export class EventsCapability extends BaseCapability {
           });
           const fromCache = /\(cached\)|Cached workbook/i.test(result.answer_hint || "");
           if (fromCache) {
-            this.logger.debug(`🗃️ lookup_events cache hit query="${query || ""}"`);
+            this.logger.debug(`🗃️ lookup_events cache hit query="${lookupQuery}"`);
           }
           return JSON.stringify(result);
         } catch (error) {

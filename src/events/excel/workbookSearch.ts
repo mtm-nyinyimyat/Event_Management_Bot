@@ -6,6 +6,7 @@ import {
   workbookSearchCache,
 } from "../../utils/queryCache";
 import { withSheetStats } from "./sheetParse";
+import { expandPersonNamesAgainstWorkbook } from "./nameMatch";
 import type {
   EventRecord,
   SheetData,
@@ -106,10 +107,18 @@ function expandQueryForRetrieval(query: string): string {
   if (/\b(sing|singing|singer|karaoke)\b/.test(q)) {
     extras.push("Karaoke", "ကာရာအိုကေ", "သီချင်း");
   }
-  if (/\b(seat|seating|sit|table)\b/.test(q)) {
-    extras.push("Table", "စားပွဲ");
+  if (
+    /\b(seat|seating|sit|table)\b/.test(q) ||
+    q.includes("ထိုင်") ||
+    q.includes("စားပွဲ")
+  ) {
+    extras.push("Table", "Name", "စားပွဲ");
   }
-  if (/\b(drink|beverage|beer|juice|cocktail)\b/.test(q)) {
+  if (
+    /\b(drink|beverage|beer|juice|cocktail)\b/.test(q) ||
+    q.includes("သောက်") ||
+    q.includes("အဖျော်")
+  ) {
     extras.push("Beverage", "BEER", "JUICE");
   }
   if (
@@ -126,6 +135,9 @@ function expandQueryForRetrieval(query: string): string {
 
 function isWhoQuery(query: string): boolean {
   const q = normalizeText(query);
+  if (isCountOrSummaryQuery(query) && !isListQuery(query)) {
+    return false;
+  }
   return (
     /\b(who|whom|whose|people|person|member|members|participant|participants)\b/.test(q) ||
     q.includes("ဘယ်သူ") ||
@@ -317,7 +329,10 @@ async function searchWorkbookUncached(
     (sourceType === "graph" ? describeGraphExcelConfig() : resolveExcelPath());
   const fileName = active?.fileName;
   const totalRows = sheetsData.reduce((sum, sheet) => sum + sheet.rows.length, 0);
-  const retrievalQuery = enrichQueryWithRequester(trimmedQuery, options.requesterName);
+  const retrievalQuery = expandPersonNamesAgainstWorkbook(
+    enrichQueryWithRequester(trimmedQuery, options.requesterName),
+    sheetsData
+  );
 
   if (!trimmedQuery) {
     const sheets = sheetsData.map((sheet) =>

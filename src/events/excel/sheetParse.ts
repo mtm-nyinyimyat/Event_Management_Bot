@@ -31,7 +31,7 @@ function isHeaderLabel(cell: string): boolean {
     return false;
   }
   return (
-    /^(no\.?|name|member name|members|team leader name|date|start time|end time|detail|description|location|remark|period|time|table|beverage|role|gps point|dev)$/i.test(
+    /^(no\.?|name|member name|members|team leader name|date|start time|end time|detail|description|location|remark|period|time|table|beverage|role|gps point|dev|event participate|mtm to event|event to home|incharge contact number)$/i.test(
       value
     ) ||
     value === "ကြာချိန်" ||
@@ -248,20 +248,16 @@ function matrixToColumnListRecords(values: unknown[][]): EventRecord[] | null {
     return null;
   }
 
-  // Prefer a later classic header row when present (normal tables).
+  // Title/banner row + classic No/Name/Location header → real table(s), not parallel lists.
   const classicHeader = values.findIndex((row) => looksLikeHeaderRow(row));
+  if (classicHeader >= 0 && classicHeader !== headerIndex) {
+    return null;
+  }
   if (classicHeader >= 0 && findRepeatedFieldBlocks(values[classicHeader] || [])) {
     return null;
   }
   if (classicHeader === headerIndex) {
     return null;
-  }
-  if (classicHeader > headerIndex) {
-    // Title row + classic single table — not a parallel list.
-    const titleCount = nonEmptyCells(values[headerIndex] || []).length;
-    if (titleCount <= 1) {
-      return null;
-    }
   }
 
   const headerRow = values[headerIndex] || [];
@@ -327,6 +323,109 @@ function matrixToColumnListRecords(values: unknown[][]): EventRecord[] | null {
   return records.length >= headers.length ? records : null;
 }
 
+function isSectionTitleRow(row: unknown[], nextRow: unknown[] | undefined): boolean {
+  if (!rowHasValue(row) || looksLikeHeaderRow(row)) {
+    return false;
+  }
+  if (!nextRow || !looksLikeHeaderRow(nextRow)) {
+    return false;
+  }
+  const first = cellToString(row[0]);
+  return /ferry|list|driver|route|အပြန်|ဖယ်ရီ/i.test(first) || nonEmptyCells(row).length <= 4;
+}
+
+/**
+ * Vertically stacked tables (ferry lists): title → No/Name/Location header → rows, repeated.
+ * Keeps Location/Gps Point on the same record as the passenger name.
+ */
+function matrixToStackedTableRecords(values: unknown[][]): EventRecord[] | null {
+  const headerIndexes: number[] = [];
+  for (let i = 0; i < values.length; i += 1) {
+    if (looksLikeHeaderRow(values[i] || [])) {
+      headerIndexes.push(i);
+    }
+  }
+  if (!headerIndexes.length) {
+    return null;
+  }
+
+  const firstHeader = headerIndexes[0];
+  const hasTitleBefore =
+    firstHeader > 0 &&
+    rowHasValue(values[firstHeader - 1] || []) &&
+    !looksLikeHeaderRow(values[firstHeader - 1] || []);
+  if (headerIndexes.length < 2 && !hasTitleBefore) {
+    return null;
+  }
+
+  const records: EventRecord[] = [];
+
+  for (let h = 0; h < headerIndexes.length; h += 1) {
+    const headerIndex = headerIndexes[h];
+    const titleRow = headerIndex > 0 ? values[headerIndex - 1] || [] : [];
+    const titleCells = nonEmptyCells(titleRow);
+    const ferry =
+      titleCells.find((cell) => /ferry|list|အပြန်|ဖယ်ရီ/i.test(cell.text))?.text ||
+      titleCells[0]?.text ||
+      "";
+    const driver =
+      titleCells.find((cell) => /driver/i.test(cell.text))?.text ||
+      (titleCells.length > 1 ? titleCells[1].text : "");
+
+    const width = primaryTableWidth(values[headerIndex] || []);
+    const headers = uniqueHeaders(
+      (values[headerIndex] || []).slice(0, width).map((cell) => cellToString(cell))
+    );
+    let emptyStreak = 0;
+
+    for (let r = headerIndex + 1; r < values.length; r += 1) {
+      const row = values[r] || [];
+      const next = values[r + 1];
+      if (looksLikeHeaderRow(row) || isSectionTitleRow(row, next)) {
+        break;
+      }
+      if (!row.slice(0, width).some((cell) => cellToString(cell))) {
+        emptyStreak += 1;
+        if (emptyStreak >= 3) {
+          break;
+        }
+        continue;
+      }
+      emptyStreak = 0;
+
+      const record: EventRecord = {};
+      if (ferry) {
+        record.Ferry = ferry;
+      }
+      if (driver) {
+        record.Driver = driver;
+      }
+      headers.forEach((header, column) => {
+        if (!header || header.startsWith("__EMPTY") || header.startsWith("Column_")) {
+          return;
+        }
+        const text = cellToString(row[column]);
+        if (text) {
+          record[header] = text;
+        }
+      });
+
+      // Skip bogus header-echo rows
+      const name = record.Name || record.NAME || "";
+      const no = record["No."] || record.No || "";
+      if (/^name$/i.test(name) || /^no\.?$/i.test(no)) {
+        continue;
+      }
+
+      if (Object.keys(record).some((key) => !["Ferry", "Driver"].includes(key))) {
+        records.push(record);
+      }
+    }
+  }
+
+  return records.length ? records : null;
+}
+
 function matrixToFlatRecords(values: unknown[][]): EventRecord[] {
   let headerIndex = values.findIndex((row) => looksLikeHeaderRow(row));
   if (headerIndex < 0) {
@@ -381,15 +480,135 @@ function matrixToFlatRecords(values: unknown[][]): EventRecord[] {
   return records;
 }
 
+function isDrinkOrMenuLabel(text: string): boolean {
+  return /^(juice|beer|cocktail|cocktial|stage|guest-\d+)$/i.test(text.trim()) ||
+    /menu|appetizer|salad|soup|dessert|main course|dinner/i.test(text) ||
+    text.startsWith("※") ||
+    text.startsWith("အာလူး") ||
+    text.includes("သုပ်") ||
+    text.includes("ဟင်း") ||
+    text.includes("ကြော်") ||
+    text.includes("ပေါင်း") ||
+    text.includes("ထမင်း") ||
+    text.includes("အသီး");
+}
+
+function looksLikeSeatPersonName(text: string): boolean {
+  const value = text.trim();
+  if (!value || value.length > 60) {
+    return false;
+  }
+  if (/^(table-\d+|vip)$/i.test(value)) {
+    return false;
+  }
+  if (isDrinkOrMenuLabel(value)) {
+    return false;
+  }
+  if (/^\d+(\.\d+)?$/.test(value)) {
+    return false;
+  }
+  // Person names in this workbook are mostly Latin; allow short Burmese too.
+  const tokens = value.split(/\s+/);
+  return tokens.length >= 1 && tokens.length <= 6 && /[A-Za-z\u1000-\u109F]/.test(value);
+}
+
+/**
+ * Visual seating charts: "Table-N" / "VIP" labels with nearby name cells.
+ * Emits one { Table, Name } record per seated person (plus optional menu rows).
+ */
+function matrixToSeatingChartRecords(values: unknown[][]): EventRecord[] | null {
+  const labels: Array<{ row: number; col: number; table: string }> = [];
+  const width = values.reduce((max, row) => Math.max(max, (row || []).length), 0);
+
+  for (let r = 0; r < values.length; r += 1) {
+    const row = values[r] || [];
+    for (let c = 0; c < row.length; c += 1) {
+      const text = cellToString(row[c]);
+      if (/^(table-\d+|vip)$/i.test(text)) {
+        labels.push({ row: r, col: c, table: text });
+      }
+    }
+  }
+
+  if (labels.length < 2) {
+    return null;
+  }
+
+  const records: EventRecord[] = [];
+  const seen = new Set<string>();
+
+  for (const label of labels) {
+    const sameRowRight = labels
+      .filter((other) => other.row === label.row && other.col > label.col)
+      .sort((a, b) => a.col - b.col)[0];
+    const colEnd = sameRowRight ? sameRowRight.col - 1 : Math.min(label.col + 5, width - 1);
+    const rowStart = Math.max(0, label.row - 3);
+    const rowEnd = Math.min(values.length - 1, label.row + 4);
+
+    for (let r = rowStart; r <= rowEnd; r += 1) {
+      const row = values[r] || [];
+      for (let c = label.col; c <= colEnd; c += 1) {
+        const text = cellToString(row[c]);
+        if (!looksLikeSeatPersonName(text)) {
+          continue;
+        }
+        const key = `${label.table}::${text}`;
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        records.push({ Table: label.table, Name: text });
+      }
+    }
+  }
+
+  // Optional dinner-menu column (far-right labels like "Dinner Menu:")
+  let menuCol = -1;
+  for (let r = 0; r < Math.min(values.length, 5); r += 1) {
+    const row = values[r] || [];
+    row.forEach((cell, c) => {
+      if (/dinner menu/i.test(cellToString(cell))) {
+        menuCol = c;
+      }
+    });
+  }
+  if (menuCol >= 0) {
+    let category = "Menu";
+    for (let r = 0; r < values.length; r += 1) {
+      const text = cellToString((values[r] || [])[menuCol]);
+      if (!text) {
+        continue;
+      }
+      if (/:$/.test(text) || /appetizer|salad|soup|main course|dessert|menu/i.test(text)) {
+        category = text.replace(/:$/, "").trim();
+        continue;
+      }
+      records.push({ Section: "Menu", Category: category, Dish: text });
+    }
+  }
+
+  return records.length >= 8 ? records : null;
+}
+
 /** Generic matrix → records for any workbook layout. */
 export function matrixToRecords(values: unknown[][]): EventRecord[] {
   if (!values?.length) {
     return [];
   }
 
+  const seating = matrixToSeatingChartRecords(values);
+  if (seating) {
+    return seating;
+  }
+
   const sectioned = matrixToSectionedRecords(values);
   if (sectioned) {
     return sectioned;
+  }
+
+  const stacked = matrixToStackedTableRecords(values);
+  if (stacked) {
+    return stacked;
   }
 
   const columnLists = matrixToColumnListRecords(values);
