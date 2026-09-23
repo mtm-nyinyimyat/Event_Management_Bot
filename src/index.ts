@@ -31,8 +31,16 @@ import {
   isUploadIngestMode,
   startEventSession,
 } from "./events/eventSession";
-import { startDeltaPolling } from "./events/deltaSync";
+import {
+  ensureGraphChangeSubscription,
+  runDeltaSyncTick,
+  startDeltaPolling,
+} from "./events/deltaSync";
 import { ensureGraphAuthReady, getGraphAuthMode } from "./events/graphAuth";
+import {
+  registerGraphWebhookRoutes,
+  setGraphWebhookChangeHandler,
+} from "./events/graphWebhook";
 import { IDatabase } from "./storage/database";
 import { StorageFactory } from "./storage/storageFactory";
 import { logModelConfigs, validateEnvironment } from "./utils/config";
@@ -89,6 +97,15 @@ const app = new App({
   logger,
   // JWT check fetches login.botframework.com. If that host is blocked, set SKIP_BOT_AUTH=1 locally.
   skipAuth: !process.env.CLIENT_ID || process.env.SKIP_BOT_AUTH === "1",
+});
+
+const webhookLogger = logger.child("graph-webhook");
+registerGraphWebhookRoutes(app, webhookLogger);
+setGraphWebhookChangeHandler((log) => {
+  void runDeltaSyncTick(log || webhookLogger).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    webhookLogger.warn(`Webhook-triggered delta sync failed: ${message}`);
+  });
 });
 
 // Initialize storage
@@ -499,6 +516,11 @@ app.on("install.add", async ({ send }) => {
 
   await app.start(port);
 
-  startDeltaPolling(logger.child("delta"));
+  const deltaLogger = logger.child("delta");
+  startDeltaPolling(deltaLogger);
+  void ensureGraphChangeSubscription(deltaLogger).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    deltaLogger.warn(`Graph change subscription setup failed: ${message}`);
+  });
   logger.debug(`🚀 Collab Agent started on port ${port}`);
 })();

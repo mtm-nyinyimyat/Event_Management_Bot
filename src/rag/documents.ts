@@ -331,13 +331,32 @@ export async function upsertSharepointSource(
       input.siteId ?? null,
       input.webUrl ?? null,
       input.subscriptionId ?? null,
-      input.subscriptionExpiresAt ?? null,
+      toIsoTimestamp(input.subscriptionExpiresAt ?? null),
       input.deltaLink ?? null,
       input.etag ?? null,
-      input.lastModifiedAt ?? null,
-      input.lastDeltaSyncAt ?? null,
+      toIsoTimestamp(input.lastModifiedAt ?? null),
+      toIsoTimestamp(input.lastDeltaSyncAt ?? null),
     ]
   );
+}
+
+/** Prefer ISO-8601 so re-upserts never send locale strings like "GMT+0630" to Postgres. */
+function toIsoTimestamp(value: Date | string | null | undefined): string | null {
+  if (value == null) {
+    return null;
+  }
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  }
+  const trimmed = String(value).trim();
+  if (!trimmed) {
+    return null;
+  }
+  const parsed = new Date(trimmed);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toISOString();
+  }
+  return trimmed;
 }
 
 function mapSharepointSource(row: {
@@ -360,13 +379,11 @@ function mapSharepointSource(row: {
     siteId: row.site_id,
     webUrl: row.web_url,
     subscriptionId: row.subscription_id,
-    subscriptionExpiresAt: row.subscription_expires_at
-      ? String(row.subscription_expires_at)
-      : null,
+    subscriptionExpiresAt: toIsoTimestamp(row.subscription_expires_at),
     deltaLink: row.delta_link,
     etag: row.etag,
-    lastModifiedAt: row.last_modified_at ? String(row.last_modified_at) : null,
-    lastDeltaSyncAt: row.last_delta_sync_at ? String(row.last_delta_sync_at) : null,
+    lastModifiedAt: toIsoTimestamp(row.last_modified_at),
+    lastDeltaSyncAt: toIsoTimestamp(row.last_delta_sync_at),
   };
 }
 

@@ -119,7 +119,9 @@ function expandQueryForRetrieval(query: string): string {
     q.includes("သောက်") ||
     q.includes("အဖျော်")
   ) {
-    extras.push("Beverage", "BEER", "JUICE");
+    // Column name only — never append specific drink tokens (BEER/JUICE).
+    // requestedDrinks() requires every token, so polluting the query breaks full-scan.
+    extras.push("Beverage");
   }
   if (
     /\b(who|whom|whose|people|person|member|members|participant|participants)\b/.test(q) ||
@@ -296,6 +298,105 @@ function isListQuery(query: string): boolean {
   return /\b(list|show|all|full|every|entire)\b/.test(q) || q.includes("စာရင်း");
 }
 
+const DRINK_ALIASES: Array<{ token: "JUICE" | "BEER" | "COCKTAIL"; pattern: RegExp }> = [
+  { token: "JUICE", pattern: /\bjuice\b|ဖျော်ရည်/i },
+  { token: "BEER", pattern: /\bbeer\b/i },
+  { token: "COCKTAIL", pattern: /\bcocktail\b|\bcocktial\b/i },
+];
+
+function requestedDrinks(query: string): Array<"JUICE" | "BEER" | "COCKTAIL"> {
+  return DRINK_ALIASES.filter((drink) => drink.pattern.test(query)).map((drink) => drink.token);
+}
+
+function isExclusiveDrinkQuery(query: string): boolean {
+  const q = normalizeText(query);
+  return (
+    /\b(only|just|exclusively|solely)\b/.test(q) ||
+    q.includes("ပဲ") ||
+    q.includes("သီးသန့်") ||
+    q.includes("ချည်း")
+  );
+}
+
+function beverageCell(row: EventRecord): string {
+  for (const [key, value] of Object.entries(row)) {
+    if (/beverag|drink/i.test(key) && value?.trim()) {
+      return value.trim();
+    }
+  }
+  return "";
+}
+
+function personLabel(row: EventRecord): string {
+  return (
+    row.Name ||
+    row.NAME ||
+    row["Member name"] ||
+    row.Members ||
+    ""
+  ).trim();
+}
+
+function drinkTokens(value: string): Set<"JUICE" | "BEER" | "COCKTAIL"> {
+  const upper = value.toUpperCase().replace(/COCKTIAL/g, "COCKTAIL");
+  const tokens = new Set<"JUICE" | "BEER" | "COCKTAIL">();
+  if (upper.includes("JUICE")) {
+    tokens.add("JUICE");
+  }
+  if (upper.includes("BEER")) {
+    tokens.add("BEER");
+  }
+  if (upper.includes("COCKTAIL")) {
+    tokens.add("COCKTAIL");
+  }
+  return tokens;
+}
+
+function rowMatchesDrinks(
+  row: EventRecord,
+  drinks: Array<"JUICE" | "BEER" | "COCKTAIL">,
+  exclusive: boolean
+): boolean {
+  if (!personLabel(row)) {
+    return false;
+  }
+  const cell = beverageCell(row);
+  if (!cell) {
+    return false;
+  }
+  const tokens = drinkTokens(cell);
+  if (!tokens.size) {
+    return false;
+  }
+  if (exclusive && drinks.length === 1) {
+    return tokens.size === 1 && tokens.has(drinks[0]);
+  }
+  return drinks.every((drink) => tokens.has(drink));
+}
+
+/**
+ * Beverage questions must scan every participant row.
+ * Hybrid RAG only returns a sample, which drops people who only chose JUICE/BEER.
+ */
+function scanBeverageMatches(sheets: SheetData[], query: string): SheetData[] | null {
+  const drinks = requestedDrinks(query);
+  if (!drinks.length) {
+    return null;
+  }
+  const exclusive = isExclusiveDrinkQuery(query);
+  const matched: SheetData[] = [];
+
+  for (const sheet of sheets) {
+    const rows = sheet.rows.filter((row) => rowMatchesDrinks(row, drinks, exclusive));
+    if (!rows.length) {
+      continue;
+    }
+    matched.push(withSheetStats(sheet, rows, { omitSummary: true }));
+  }
+
+  return matched.length ? matched : null;
+}
+
 function resultLimit(maxResults?: number): number {
   const raw = maxResults ?? DEFAULT_MAX_RESULTS;
   return Math.max(1, Math.min(raw, 200));
@@ -353,6 +454,27 @@ async function searchWorkbookUncached(
 
   const summaryOnly = isCountOrSummaryQuery(trimmedQuery) && !isListQuery(trimmedQuery);
   const ragConfig = getRagConfig();
+
+  // Drink detection must use the original query — retrievalQuery may append
+  // synonym tokens that requestedDrinks() would then require together (AND).
+  const beverageSheets = scanBeverageMatches(sheetsData, trimmedQuery);
+  if (beverageSheets) {
+    const matchCount = beverageSheets.reduce((sum, sheet) => sum + sheet.rows.length, 0);
+    const drinks = requestedDrinks(trimmedQuery).join(" + ");
+    const exclusive = isExclusiveDrinkQuery(trimmedQuery);
+    return {
+      source,
+      source_type: sourceType,
+      file_name: fileName,
+      total_rows: totalRows,
+      match_count: matchCount,
+      retrieval: "beverage",
+      answer_hint: exclusive
+        ? `Complete list: ${matchCount} people whose beverage is only ${drinks}. List every Name. Do not treat this as a sample.`
+        : `Complete list: ${matchCount} people whose beverage includes ${drinks}. List every Name. Do not treat this as a sample.`,
+      sheets: beverageSheets,
+    };
+  }
 
   if (!summaryOnly && ragConfig.enabled && active) {
     try {

@@ -329,6 +329,12 @@ async function resolveDriveId(siteId: string): Promise<string> {
   return drive.id;
 }
 
+/** Resolve EVENTS_GRAPH_DRIVE_ID (`me` → personal OneDrive id). */
+export async function resolveConfiguredDriveId(): Promise<string> {
+  const configured = process.env.EVENTS_GRAPH_DRIVE_ID?.trim() || "me";
+  return resolveUserDriveId(configured);
+}
+
 async function getItemByPath(driveId: string, itemPath: string): Promise<GraphDriveItem> {
   const encoded = encodeDrivePath(itemPath);
   return graphFetch<GraphDriveItem>(
@@ -733,7 +739,11 @@ export interface GraphDeltaItem {
   lastModifiedDateTime?: string;
   deleted?: { state?: string };
   file?: { mimeType?: string };
-  parentReference?: { driveId?: string };
+  parentReference?: {
+    driveId?: string;
+    id?: string;
+    path?: string;
+  };
 }
 
 export interface GraphDeltaResult {
@@ -836,15 +846,18 @@ export async function getDeltaChanges(options: {
 }
 
 /**
- * Phase 2: Graph Change Notifications. Requires public HTTPS notificationUrl.
- * No-op when GRAPH_WEBHOOK_URL / BOT_ENDPOINT is unset.
+ * Graph Change Notifications subscription.
+ * Personal OneDrive: can target a subfolder (`/drives/{id}/items/{folderId}`).
+ * OneDrive for Business: root only — adjust resource before production.
  */
 export async function createGraphSubscription(options: {
   notificationUrl: string;
   resource: string;
+  /** DriveItem subscriptions only support `updated` (covers create/update/delete in hierarchy). */
+  changeType?: string;
   clientState?: string;
   expirationDateTime?: string;
-}): Promise<{ id: string; expirationDateTime?: string } | null> {
+}): Promise<{ id: string; expirationDateTime?: string; resource?: string } | null> {
   const notificationUrl = options.notificationUrl.trim();
   if (!notificationUrl) {
     return null;
@@ -854,13 +867,19 @@ export async function createGraphSubscription(options: {
     options.expirationDateTime ||
     new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString();
 
-  return graphFetch<{ id: string; expirationDateTime?: string }>(
+  // OneDrive/SharePoint driveItem webhooks reject created/deleted — updated only.
+  const changeType =
+    options.changeType?.trim() ||
+    process.env.GRAPH_WEBHOOK_CHANGE_TYPE?.trim() ||
+    "updated";
+
+  return graphFetch<{ id: string; expirationDateTime?: string; resource?: string }>(
     "https://graph.microsoft.com/v1.0/subscriptions",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        changeType: "updated",
+        changeType,
         notificationUrl,
         resource: options.resource,
         expirationDateTime,
