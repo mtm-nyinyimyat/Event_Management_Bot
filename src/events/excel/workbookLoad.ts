@@ -3,12 +3,13 @@ import path from "path";
 import * as XLSX from "xlsx";
 import { ensureWorkbookIndexed } from "../../rag";
 import { getRagConfig } from "../../rag/config";
+import { clearQueryCaches } from "../../utils/queryCache";
 import {
   assertGraphExcelConfig,
   describeGraphExcelConfig,
   readAllowedExcelWorkbooksFromGraph,
 } from "../graphExcelClient";
-import { parseSheet } from "./sheetParse";
+import { buildSheetSummary, parseSheet } from "./sheetParse";
 import type { CachedWorkbook, SheetData, WorkbookLookupOptions } from "./types";
 import {
   cacheTtlMs,
@@ -108,15 +109,13 @@ async function loadGraphWorkbook(): Promise<CachedWorkbook> {
     workbook.sheets.map((sheet) => {
       const sheetName = multi ? `${workbook.fileName} / ${sheet.sheet}` : sheet.sheet;
       const rows = sheet.rows as SheetData["rows"];
-      const numbered = rows.filter((row) => /^\d+$/.test(String(row["No."] || row.No || "").trim()));
       return {
         sheet: sheetName,
         rows,
-        numbered_item_count: numbered.length,
-        summary: {
-          total_rows: rows.length,
-          numbered_item_count: numbered.length,
-        },
+        numbered_item_count: rows.filter((row) =>
+          /^\d+$/.test(String(row["No."] || row.No || "").trim())
+        ).length,
+        summary: buildSheetSummary(sheetName, rows),
       };
     })
   );
@@ -157,27 +156,76 @@ export async function loadWorkbook(
   }
 
   const resolvedUpload = resolveUploadedWorkbook(conversationId, options.userId);
-  if (resolvedUpload && (!forceRefresh || resolvedUpload.sourceType === "upload")) {
-    setWorkbookCache(resolvedUpload);
-    const ragConfig = getRagConfig();
-    try {
-      await ensureWorkbookIndexed(
-        resolvedUpload.sheets,
-        {
-          source: resolvedUpload.source,
-          loadedAt: resolvedUpload.loadedAt,
-          documentId: options.documentId,
-        },
-        ragConfig
-      );
-    } catch (error) {
-      console.warn(
-        `RAG index failed, falling back to lexical: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
+  if (resolvedUpload) {
+    const isChatUpload =
+      resolvedUpload.sourceType === "upload" ||
+      resolvedUpload.source.startsWith("chat-upload://");
+    const stale = Date.now() - resolvedUpload.loadedAt >= ttl;
+
+    // Graph/SharePoint session workbooks must refresh when TTL expires —
+    // otherwise edits in Excel (e.g. flipping Event To Home ×) never appear.
+    if (!isChatUpload && stale) {
+      try {
+        const { ensureActiveWorkbookInMemory } = await import("../eventSession.js");
+        const refreshed = await ensureActiveWorkbookInMemory(
+          conversationId || "",
+          undefined,
+          { force: true }
+        );
+        if (refreshed?.sheets?.length) {
+          setWorkbookCache(refreshed);
+          clearQueryCaches();
+          const ragCfg = getRagConfig();
+          try {
+            await ensureWorkbookIndexed(
+              refreshed.sheets,
+              {
+                source: refreshed.source,
+                loadedAt: refreshed.loadedAt,
+                documentId: options.documentId,
+              },
+              ragCfg
+            );
+          } catch (indexError) {
+            console.warn(
+              `RAG index failed after refresh, falling back to lexical: ${
+                indexError instanceof Error ? indexError.message : String(indexError)
+              }`
+            );
+          }
+          return refreshed.sheets;
+        }
+      } catch (refreshError) {
+        console.warn(
+          `Stale conversation workbook refresh failed, using cached sheets: ${
+            refreshError instanceof Error ? refreshError.message : String(refreshError)
+          }`
+        );
+      }
     }
-    return resolvedUpload.sheets;
+
+    if (!forceRefresh || isChatUpload) {
+      setWorkbookCache(resolvedUpload);
+      const ragConfig = getRagConfig();
+      try {
+        await ensureWorkbookIndexed(
+          resolvedUpload.sheets,
+          {
+            source: resolvedUpload.source,
+            loadedAt: resolvedUpload.loadedAt,
+            documentId: options.documentId,
+          },
+          ragConfig
+        );
+      } catch (error) {
+        console.warn(
+          `RAG index failed, falling back to lexical: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+      return resolvedUpload.sheets;
+    }
   }
 
   if (isEventSessionMode()) {

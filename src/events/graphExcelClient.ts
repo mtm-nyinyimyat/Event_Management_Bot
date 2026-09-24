@@ -616,6 +616,7 @@ export interface GraphChatAttachment {
   contentType?: string;
   contentUrl?: string;
   content?: string;
+  webUrl?: string;
 }
 
 export interface GraphChatMessage {
@@ -659,7 +660,7 @@ export async function fetchTeamsMessageFromGraph(
 
   const encodedChatId = encodeURIComponent(conversationId);
   return graphFetchOptional<GraphChatMessage>(
-    `https://graph.microsoft.com/v1.0/chats/${encodedChatId}/messages/${encodedMessageId}`
+    `https://graph.microsoft.com/v1.0/chats/${encodedChatId}/messages/${encodedMessageId}?$expand=attachments`
   );
 }
 

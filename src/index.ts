@@ -23,14 +23,18 @@ import {
   addPendingUploads,
   endEventSession,
   extractSharePointUrls,
+  extractSharePointUrlsFromActivity,
+  extractSharePointUrlsFromGraphMessage,
   findActiveEventSession,
   getEventIngestMode,
   isAnyEventActive,
   isEndEventCommand,
   isStartEventCommand,
   isUploadIngestMode,
+  mergeSharePointUrls,
   startEventSession,
 } from "./events/eventSession";
+import { fetchTeamsMessageFromGraph } from "./events/graphExcelClient";
 import {
   ensureGraphChangeSubscription,
   runDeltaSyncTick,
@@ -151,11 +155,64 @@ function isOutboundBlocked(error: unknown): boolean {
 }
 
 function stripMentions(text?: string): string {
-  return String(text || "")
-    .replace(/<\/?at>/gi, " ")
-    .replace(/<at>[^<]*<\/at>/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return (
+    String(text || "")
+      .replace(/<at\b[^>]*>[\s\S]*?<\/at>/gi, " ")
+      .replace(/<\/?at\b[^>]*>/gi, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/\u200b|\ufeff|\u00a0/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+  );
+}
+
+/** Teams mention entities vary; also treat explicit <at>bot</at> body as a mention. */
+function isBotMentioned(activity: {
+  entities?: unknown[];
+  text?: string;
+}): boolean {
+  const entities = activity.entities || [];
+  const hasMentionEntity = entities.some((entity) => {
+    const e = entity as { type?: string; mentioned?: { id?: string; name?: string } };
+    if (e?.type === "mention") {
+      return true;
+    }
+    return Boolean(e?.mentioned);
+  });
+  if (hasMentionEntity) {
+    return true;
+  }
+  return /<at\b[^>]*>[\s\S]*?<\/at>/i.test(String(activity.text || ""));
+}
+
+/** Best-effort Graph re-read: BF often omits channel post previews/files. */
+async function fetchGraphMessageSafe(
+  activity: {
+    id?: string;
+    conversation?: { id?: string };
+    channelData?: unknown;
+  }
+): Promise<Awaited<ReturnType<typeof fetchTeamsMessageFromGraph>>> {
+  const messageId = activity.id;
+  const conversationId = activity.conversation?.id;
+  if (!messageId || !conversationId) {
+    return undefined;
+  }
+  const channelData = (activity.channelData || {}) as {
+    team?: { id?: string };
+    channel?: { id?: string };
+  };
+  try {
+    return await fetchTeamsMessageFromGraph(conversationId, messageId, {
+      team: channelData.team,
+      channel: channelData.channel,
+    });
+  } catch (error) {
+    logger.debug(
+      `Graph message enrich skipped: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return undefined;
+  }
 }
 
 async function sendServiceUnavailable(
@@ -212,7 +269,7 @@ async function replyFromManager(
 }
 
 app.on("message", async ({ send, activity, api }) => {
-  const botMentioned = activity.entities?.some((e) => e.type === "mention");
+  const botMentioned = isBotMentioned(activity);
   // In groups, also handle Excel uploads without @mention (test /start flow).
   const excelUploadLikely = isUploadIngestMode() && activityLikelyHasExcelUpload(activity);
   const shouldHandle = !activity.conversation.isGroup || botMentioned || excelUploadLikely;
@@ -231,12 +288,59 @@ app.on("message", async ({ send, activity, api }) => {
     }
 
     try {
-      const text = stripMentions(activity.text);
+      // Channel posts: BF payload often lacks preview/file links — re-read via Graph.
+      const graphMessage = await fetchGraphMessageSafe(activity);
+      const activityText = graphMessage?.body?.content || activity.text;
+      const text = stripMentions(activityText);
+      // Prefer Graph body so the manager sees full channel-post content after @mention.
+      if (graphMessage?.body?.content && !String(activity.text || "").includes(graphMessage.body.content)) {
+        context.text = activityText;
+      }
+      if (isStartEventCommand(activityText) || isEndEventCommand(activityText)) {
+        context.text = stripMentions(activityText);
+        logger.debug(`Command from Graph/BF body; context.text="${context.text}"`);
+      }
+      if (graphMessage) {
+        logger.debug(
+          `Graph enrich ok: attachments=${graphMessage.attachments?.length || 0} bodyLen=${graphMessage.body?.content?.length || 0}`
+        );
+      }
       const conversationId = context.conversationId;
       const userName = context.userName || activity.from?.name || "unknown";
       const ingestMode = getEventIngestMode();
 
+      // Extract SharePoint links from this post FIRST so "/start" in the same
+      // message (or thread) can load them. BF often omits preview/file URLs;
+      // Graph re-read fills them in.
+      let shareUrlsThisMessage: string[] = [];
+      if (ingestMode === "sharepoint" && !isEmoticonOnlyActivity(activity)) {
+        shareUrlsThisMessage = mergeSharePointUrls(
+          extractSharePointUrlsFromActivity(activity),
+          extractSharePointUrlsFromGraphMessage(graphMessage)
+        );
+        logger.debug(
+          `Share URLs in message: count=${shareUrlsThisMessage.length} ` +
+            `bfAttachments=${activity.attachments?.length || 0} ` +
+            `graphAttachments=${graphMessage?.attachments?.length || 0} ` +
+            `urls=${JSON.stringify(shareUrlsThisMessage)}`
+        );
+        if (shareUrlsThisMessage.length > 0 && !(await isAnyEventActive())) {
+          const staged = await addPendingShareUrls(conversationId, shareUrlsThisMessage);
+          logger.debug(
+            `Pre-staged SharePoint URL(s) before command routing (pending=${staged.pendingUrls.length})`
+          );
+        }
+      }
+
       // Lifecycle commands take priority over LLM routing
+      const commandTexts = [text, stripMentions(activity.text), String(activity.text || "")];
+      const isStartCmd = commandTexts.some((value) => isStartEventCommand(value));
+      const isEndCmd = commandTexts.some((value) => isEndEventCommand(value));
+      if (isStartCmd || isEndCmd) {
+        logger.debug(
+          `Command match start=${isStartCmd} end=${isEndCmd} raw="${String(activity.text || "").slice(0, 80)}" stripped="${text.slice(0, 80)}"`
+        );
+      }
       if (isEmoticonOnlyActivity(activity)) {
         // Stickers/animated emoji are not questions and must not hit LLM or error fallback.
         const active = await findActiveEventSession();
@@ -251,7 +355,7 @@ app.on("message", async ({ send, activity, api }) => {
         );
         trackedMessages = createMessageRecords([activity]);
         logger.debug(`Ignored emoticon-only message; replied id=${sent.id}`);
-      } else if (isStartEventCommand(text)) {
+      } else if (isStartCmd) {
         if (await isAnyEventActive()) {
           const confirmation =
             "There's already an event running.\n" +
@@ -265,6 +369,10 @@ app.on("message", async ({ send, activity, api }) => {
           trackedMessages = createMessageRecords([activity]);
           logger.debug(`Blocked /start while event active; replied id=${sent.id}`);
         } else {
+          // Ensure links from this same post are saved before start reads pendingUrls.
+          if (shareUrlsThisMessage.length > 0) {
+            await addPendingShareUrls(conversationId, shareUrlsThisMessage);
+          }
           const confirmation = await startEventSession({
             conversationId,
             startedBy: userName,
@@ -279,7 +387,7 @@ app.on("message", async ({ send, activity, api }) => {
           trackedMessages = createMessageRecords([activity]);
           logger.debug(`Event start replied id=${sent.id}`);
         }
-      } else if (isEndEventCommand(text)) {
+      } else if (isEndCmd) {
         const confirmation = await endEventSession({
           conversationId,
           logger: logger.child("event-session"),
@@ -351,39 +459,54 @@ app.on("message", async ({ send, activity, api }) => {
         }
       } else {
         // --- SharePoint URL mode (EVENTS_INGEST_MODE=sharepoint) ---
-        const shareUrls = extractSharePointUrls(activity.text);
-        const textWithoutUrls = shareUrls
-          .reduce((acc, url) => acc.replace(url, " "), text)
+        // Prefer URLs already extracted (BF + Graph) above.
+        const shareUrls = shareUrlsThisMessage;
+        const textUrls = mergeSharePointUrls(
+          extractSharePointUrls(activity.text),
+          extractSharePointUrls(activityText)
+        );
+        const textWithoutUrls = textUrls
+          .reduce((acc, url) => acc.split(url).join(" "), text)
+          .replace(/<[^>]+>/g, " ")
           .replace(/\s+/g, " ")
           .trim();
-        if (shareUrls.length > 0 && textWithoutUrls.length < 8) {
-          if (await isAnyEventActive()) {
-            const confirmation =
-              "There's already an event running.\n" +
-              "Send /end first if you want to paste a new link.";
-            const sent = await send(
-              finalizePromptResponse(
-                confirmation,
-                replyOptionsFromContext(context, { withFeedback: false })
-              )
-            );
-            trackedMessages = createMessageRecords([activity]);
-            logger.debug(`Blocked SharePoint URL while event active; replied id=${sent.id}`);
-          } else {
-            const session = await addPendingShareUrls(conversationId, shareUrls);
-            const confirmation =
-              `Got your SharePoint link 🙂 (${session.pendingUrls.length} pending)\n\n` +
-              `Send /start when you want me to load it.\n` +
-              `Send /end later to clear everything.`;
-            const sent = await send(
-              finalizePromptResponse(
-                confirmation,
-                replyOptionsFromContext(context, { withFeedback: false })
-              )
-            );
-            trackedMessages = createMessageRecords([activity]);
-            logger.debug(`Pending SharePoint URL(s) saved; replied id=${sent.id}`);
-          }
+        const remainingWords = textWithoutUrls ? textWithoutUrls.split(/\s+/).length : 0;
+        const hasLinkContent = shareUrls.length > 0;
+        // Bare paste, short ask after @mention, or preview/file-only card.
+        const looksLikeLinkShare =
+          hasLinkContent &&
+          (remainingWords <= 8 ||
+            (botMentioned && remainingWords <= 20) ||
+            (remainingWords === 0 && (activity.attachments?.length || 0) > 0));
+
+        if (hasLinkContent && !(await isAnyEventActive())) {
+          const session = await addPendingShareUrls(conversationId, shareUrls);
+          const confirmation =
+            `Got your SharePoint link 🙂 (${session.pendingUrls.length} pending)\n\n` +
+            `Send /start when you want me to load it.\n` +
+            `Send /end later to clear everything.`;
+          const sent = await send(
+            finalizePromptResponse(
+              confirmation,
+              replyOptionsFromContext(context, { withFeedback: false })
+            )
+          );
+          trackedMessages = createMessageRecords([activity]);
+          logger.debug(
+            `Pending SharePoint URL(s) saved from post (urls=${shareUrls.length}, pending=${session.pendingUrls.length}); replied id=${sent.id}`
+          );
+        } else if (looksLikeLinkShare) {
+          const confirmation =
+            "There's already an event running.\n" +
+            "Send /end first if you want to paste a new link.";
+          const sent = await send(
+            finalizePromptResponse(
+              confirmation,
+              replyOptionsFromContext(context, { withFeedback: false })
+            )
+          );
+          trackedMessages = createMessageRecords([activity]);
+          logger.debug(`Blocked SharePoint URL while event active; replied id=${sent.id}`);
         } else {
           trackedMessages = await replyFromManager(send, context, activity, logger);
         }

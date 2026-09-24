@@ -619,6 +619,39 @@ export function matrixToRecords(values: unknown[][]): EventRecord[] {
   return matrixToFlatRecords(values);
 }
 
+const CHECKMARK_TOKENS = /[〇○●◯◎✓✔]/u;
+const CROSS_TOKENS = /[×✗✘]/u;
+
+export function isCheckedMark(value: string | undefined): boolean {
+  const cell = (value || "").trim();
+  if (!cell) {
+    return false;
+  }
+  return CHECKMARK_TOKENS.test(cell) || /^(yes|y|true|1|v)$/i.test(cell);
+}
+
+function countCheckmarks(rows: EventRecord[], column: string): { checked: number; total: number } {
+  let checked = 0;
+  let total = 0;
+  for (const row of rows) {
+    const value = (row[column] || "").trim();
+    if (!value) {
+      continue;
+    }
+    if (isCheckedMark(value)) {
+      checked += 1;
+      total += 1;
+    } else if (CROSS_TOKENS.test(value) || /^(no|n|false|0|x)$/i.test(value)) {
+      total += 1;
+    }
+  }
+  return { checked, total };
+}
+
+export function buildSheetSummary(sheetName: string, rows: EventRecord[]): SheetSummary {
+  return defaultSummaryForRows(sheetName, rows);
+}
+
 function defaultSummaryForRows(sheetName: string, rows: EventRecord[]): SheetSummary {
   const numbered = rows.filter((row) => isNumbered(row["No."] || row.No));
   const columns = fieldOrderFromRows(rows).slice(0, 24);
@@ -634,6 +667,17 @@ function defaultSummaryForRows(sheetName: string, rows: EventRecord[]): SheetSum
   }
   if (/volunteer/i.test(sheetName)) {
     summary.volunteer_roles = numbered.length;
+  }
+
+  const checkmarkColumns: Record<string, { checked: number; total: number }> = {};
+  for (const column of columns) {
+    const counts = countCheckmarks(rows, column);
+    if (counts.total >= 2) {
+      checkmarkColumns[column] = counts;
+    }
+  }
+  if (Object.keys(checkmarkColumns).length) {
+    summary.checkmark_columns = checkmarkColumns;
   }
   return summary;
 }
@@ -680,19 +724,28 @@ export function compactRow(row: EventRecord, fieldOrder?: string[]): EventRecord
 export function withSheetStats(
   sheet: SheetData,
   rows: EventRecord[],
-  options?: { summaryOnly?: boolean; omitSummary?: boolean }
+  options?: { summaryOnly?: boolean; omitSummary?: boolean; keepCheckmarkColumns?: boolean }
 ): SheetData {
   const fieldOrder = fieldOrderFromRows(rows.length ? rows : sheet.rows);
   const compactRows = options?.summaryOnly
     ? rows.slice(0, 5).map((row) => compactRow(row, fieldOrder))
     : rows.map((row) => compactRow(row, fieldOrder));
 
+  let summary: SheetSummary | undefined;
+  if (options?.omitSummary) {
+    if (options?.keepCheckmarkColumns && sheet.summary?.checkmark_columns) {
+      summary = { checkmark_columns: sheet.summary.checkmark_columns };
+    }
+  } else {
+    summary = sheet.summary;
+  }
+
   return {
     sheet: sheet.sheet,
     numbered_item_count: options?.omitSummary
       ? compactRows.length
       : sheet.numbered_item_count ?? rows.filter((row) => isNumbered(row["No."] || row.No)).length,
-    summary: options?.omitSummary ? undefined : sheet.summary,
+    summary,
     rows: compactRows,
   };
 }

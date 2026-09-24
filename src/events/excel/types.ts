@@ -1,9 +1,10 @@
 export type EventRecord = Record<string, string>;
 
-export type SheetSummary = Record<
-  string,
-  string | number | Record<string, number> | Record<string, string>
->;
+export interface SheetSummaryValue {
+  [key: string]: string | number | SheetSummaryValue | undefined;
+}
+
+export type SheetSummary = Record<string, string | number | SheetSummaryValue>;
 
 export interface SheetData {
   sheet: string;
@@ -19,7 +20,7 @@ export interface WorkbookSearchResult {
   total_rows: number;
   match_count: number;
   answer_hint?: string;
-  retrieval?: "hybrid" | "lexical" | "overview" | "beverage";
+  retrieval?: "hybrid" | "lexical" | "overview" | "beverage" | "checkmark";
   rag?: {
     enabled: boolean;
     provider: string;

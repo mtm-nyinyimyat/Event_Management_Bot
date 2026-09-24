@@ -1,7 +1,11 @@
 export type EmbeddingProviderName = "local" | "openai" | "azure";
 
 export type RagRow = Record<string, string>;
-export type RagSummary = Record<string, string | number | Record<string, number>>;
+export interface RagSummaryValue {
+  [key: string]: string | number | RagSummaryValue | undefined;
+}
+
+export type RagSummary = Record<string, string | number | RagSummaryValue>;
 
 export interface RagChunk {
   id: string;

@@ -23,9 +23,6 @@ export class EventsCapability extends BaseCapability {
       "Search the event Excel workbook with hybrid RAG (semantic + keyword) and return summaries plus matching rows",
       LOOKUP_EVENTS_SCHEMA,
       async ({ query, max_results }: LookupEventsArgs) => {
-        // Keep the user's original text (often Burmese names) so lookup can
-        // resolve them to Excel English NAME values — do not rely on the model
-        // to romanize correctly.
         const lookupQuery = [query || "", context.text || ""]
           .map((part) => part.trim())
           .filter(Boolean)
@@ -44,6 +41,7 @@ export class EventsCapability extends BaseCapability {
           if (fromCache) {
             this.logger.debug(`🗃️ lookup_events cache hit query="${lookupQuery}"`);
           }
+          console.log("raw lookup query result ==========>", JSON.stringify(result));
           return JSON.stringify(result);
         } catch (error) {
           const message = error instanceof Error ? error.message : "Unknown Excel error";

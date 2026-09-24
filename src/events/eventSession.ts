@@ -76,36 +76,44 @@ async function ensureSchema(): Promise<void> {
 }
 
 function normalizeCommandText(text: string): string {
-  return text
-    .replace(/<\/?at>/gi, " ")
-    .replace(/<at>[^<]*<\/at>/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
+  return (
+    String(text || "")
+      // Teams mentions: <at>name</at>, <at id="28:...">name</at>, nested markup
+      .replace(/<at\b[^>]*>[\s\S]*?<\/at>/gi, " ")
+      .replace(/<\/?at\b[^>]*>/gi, " ")
+      // Graph HTML body wrappers (<div>, <p>, <span>, …)
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&#39;/g, "'")
+      .replace(/&quot;/g, '"')
+      .replace(/\u200b|\ufeff|\u00a0/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase()
+  );
 }
 
 export function isStartEventCommand(text: string): boolean {
   const t = normalizeCommandText(text);
-  return (
-    t === "/start" ||
-    t === "start event"
-  );
+  if (t === "/start" || t === "start event") {
+    return true;
+  }
+  // Mention leftovers / extra punctuation: treat a standalone /start token as the command.
+  if (/(?:^|\s)\/start(?:$|[\s.,!?])/.test(t) && !/(?:^|\s)\/end/.test(t)) {
+    return true;
+  }
+  return false;
 }
 
 export function isEndEventCommand(text: string): boolean {
   const t = normalizeCommandText(text);
-  return (
-    t === "/end" ||
-    t === "/endevent" ||
-    t === "endevent" ||
-    t === "end event"
-  );
+  if (t === "/end" || t === "/endevent" || t === "endevent" || t === "end event") {
+    return true;
+  }
+  return /(?:^|\s)\/end(?:event)?(?:$|[\s.,!?])/.test(t);
 }
 
-export function extractSharePointUrls(text?: string): string[] {
-  if (!text) {
-    return [];
-  }
+function findSharePointUrlsInText(text: string): string[] {
   const matches = text.match(/https?:\/\/[^\s"'<>]+/gi) || [];
   const cleaned = matches.map((url) => url.replace(/&amp;/g, "&").replace(/[),.;]+$/g, ""));
   return [
@@ -114,14 +122,166 @@ export function extractSharePointUrls(text?: string): string[] {
         const lower = url.toLowerCase();
         return (
           lower.includes("sharepoint.com") ||
+          lower.includes("sharepoint") ||
           lower.includes("onedrive") ||
+          lower.includes("1drv.") ||
+          lower.includes("office.com") ||
+          lower.includes("teams.microsoft.com") ||
           lower.includes("/:x:/") ||
+          lower.includes("/:u:/") ||
           lower.includes(".xlsx") ||
-          lower.includes("doc.aspx")
+          lower.includes(".xls") ||
+          lower.includes("doc.aspx") ||
+          lower.includes("download.aspx")
         );
       })
     ),
   ];
+}
+
+export function extractSharePointUrls(text?: string): string[] {
+  if (!text) {
+    return [];
+  }
+  return findSharePointUrlsInText(text);
+}
+
+function collectStringsFromContent(value: unknown, out: string[], depth = 0): void {
+  if (depth > 8 || value == null) {
+    return;
+  }
+  if (typeof value === "string") {
+    out.push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectStringsFromContent(item, out, depth + 1);
+    }
+    return;
+  }
+  if (typeof value === "object") {
+    for (const item of Object.values(value as Record<string, unknown>)) {
+      collectStringsFromContent(item, out, depth + 1);
+    }
+  }
+}
+
+function isShareLinkUrl(url: string): boolean {
+  return /\/:[xuws]:\//i.test(url);
+}
+
+function directPathKey(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.host.toLowerCase()}${decodeURIComponent(parsed.pathname).toLowerCase()}`;
+  } catch {
+    return url.split("?")[0].toLowerCase();
+  }
+}
+
+/**
+ * One Teams link preview often yields contentUrl + downloadUrl + :x:/ href.
+ * Prefer share links when present; otherwise collapse same-path variants.
+ */
+function collapseShareUrlVariants(urls: string[]): string[] {
+  if (urls.length <= 1) {
+    return urls;
+  }
+  const unique = [...new Set(urls)];
+  const shareLinks = unique.filter(isShareLinkUrl);
+  if (shareLinks.length > 0) {
+    return [...new Set(shareLinks)];
+  }
+
+  const byPath = new Map<string, string>();
+  for (const url of unique) {
+    const key = directPathKey(url);
+    const existing = byPath.get(key);
+    if (!existing) {
+      byPath.set(key, url);
+      continue;
+    }
+    if (!/[?&]download=/i.test(url) && /[?&]download=/i.test(existing)) {
+      byPath.set(key, url);
+    }
+  }
+  return [...byPath.values()];
+}
+
+/**
+ * Collect SharePoint/Excel URLs from message text AND link-preview/file attachments.
+ * Teams link previews often leave activity.text empty or title-only; the real URL
+ * lives in text/html content, contentUrl, or file.download.info JSON.
+ */
+export function extractSharePointUrlsFromActivity(activity: {
+  text?: string;
+  attachments?: Array<{
+    contentType?: string;
+    contentUrl?: string;
+    content?: unknown;
+    name?: string;
+    thumbnailUrl?: string;
+  }>;
+  entities?: unknown[];
+}): string[] {
+  const parts: string[] = [];
+  if (activity.text) {
+    parts.push(activity.text);
+  }
+  for (const attachment of activity.attachments || []) {
+    if (attachment.contentUrl) {
+      parts.push(attachment.contentUrl);
+    }
+    if (attachment.thumbnailUrl) {
+      parts.push(attachment.thumbnailUrl);
+    }
+    collectStringsFromContent(attachment.content, parts);
+    // File cards sometimes only put the workbook name in text + a URL on the card body.
+    if (attachment.name && /\.xlsx?$/i.test(attachment.name)) {
+      collectStringsFromContent(attachment.content, parts);
+    }
+  }
+  // Link cards sometimes live only on entities.
+  collectStringsFromContent(activity.entities, parts);
+  return collapseShareUrlVariants(findSharePointUrlsInText(parts.join("\n")));
+}
+
+/** URLs from a Graph Teams message (channel/chat) body + attachments. */
+export function extractSharePointUrlsFromGraphMessage(message?: {
+  body?: { content?: string };
+  attachments?: Array<{
+    contentType?: string;
+    contentUrl?: string;
+    content?: string;
+    name?: string;
+    webUrl?: string;
+  }>;
+}): string[] {
+  if (!message) {
+    return [];
+  }
+  const parts: string[] = [];
+  if (message.body?.content) {
+    parts.push(message.body.content);
+  }
+  for (const attachment of message.attachments || []) {
+    if (attachment.contentUrl) {
+      parts.push(attachment.contentUrl);
+    }
+    if (attachment.webUrl) {
+      parts.push(attachment.webUrl);
+    }
+    if (typeof attachment.content === "string") {
+      parts.push(attachment.content);
+    }
+  }
+  return collapseShareUrlVariants(findSharePointUrlsInText(parts.join("\n")));
+}
+
+/** Merge BF + Graph URL candidates, then collapse preview variants. */
+export function mergeSharePointUrls(...groups: string[][]): string[] {
+  return collapseShareUrlVariants(groups.flat());
 }
 
 function mapRow(row: {
@@ -505,6 +665,9 @@ export async function startEventSession(options: {
   }
 
   // --- SharePoint URL mode (kept for later; enable with EVENTS_INGEST_MODE=sharepoint) ---
+  logger?.debug(
+    `startEventSession sharepoint: status=${session.status} pending=${session.pendingUrls.length} urls=${JSON.stringify(session.pendingUrls)}`
+  );
   if (!session.pendingUrls.length && session.status !== "active") {
     return (
       "I don't have a SharePoint link yet.\n" +
@@ -590,13 +753,15 @@ export async function endEventSession(options: {
 /**
  * Rehydrate after process restart when possible.
  * SharePoint URL sessions can re-download; chat-upload sessions cannot (buffers are in-memory only).
+ * Pass force:true to re-download even when an in-memory copy exists (TTL refresh).
  */
 export async function ensureActiveWorkbookInMemory(
   conversationId: string,
-  logger?: ILogger
+  logger?: ILogger,
+  options?: { force?: boolean }
 ): Promise<CachedWorkbook | null> {
   const existing = getConversationWorkbook(conversationId);
-  if (existing) {
+  if (existing && !options?.force) {
     return existing;
   }
 

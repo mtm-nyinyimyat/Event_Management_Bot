@@ -5,7 +5,7 @@ import {
   normalizeCacheQuery,
   workbookSearchCache,
 } from "../../utils/queryCache";
-import { withSheetStats } from "./sheetParse";
+import { isCheckedMark, withSheetStats } from "./sheetParse";
 import { expandPersonNamesAgainstWorkbook } from "./nameMatch";
 import type {
   EventRecord,
@@ -173,6 +173,16 @@ function rowLooksLikePersonFact(row: EventRecord): boolean {
   return !looksLikeInventoryValue(value);
 }
 
+/** Keep only checkmark totals when dropping the rest of the summary (who-queries / row samples). */
+function checkmarkOnlySummary(
+  summary: SheetData["summary"]
+): SheetData["summary"] {
+  if (!summary?.checkmark_columns) {
+    return undefined;
+  }
+  return { checkmark_columns: summary.checkmark_columns };
+}
+
 /** For "who is in X" questions, keep people rows and drop costume/rental line-items. */
 function preferPeopleRows(sheets: SheetData[], query: string): SheetData[] {
   if (!isWhoQuery(query)) {
@@ -190,9 +200,19 @@ function preferPeopleRows(sheets: SheetData[], query: string): SheetData[] {
         return rowLooksLikePersonFact(row);
       });
       if (!people.length) {
-        return { ...sheet, rows: [], numbered_item_count: 0, summary: undefined };
+        return {
+          ...sheet,
+          rows: [],
+          numbered_item_count: 0,
+          summary: checkmarkOnlySummary(sheet.summary),
+        };
       }
-      return { ...sheet, rows: people, numbered_item_count: people.length, summary: undefined };
+      return {
+        ...sheet,
+        rows: people,
+        numbered_item_count: people.length,
+        summary: checkmarkOnlySummary(sheet.summary),
+      };
     })
     .filter((sheet) => sheet.rows.length > 0);
 }
@@ -391,7 +411,67 @@ function scanBeverageMatches(sheets: SheetData[], query: string): SheetData[] | 
     if (!rows.length) {
       continue;
     }
-    matched.push(withSheetStats(sheet, rows, { omitSummary: true }));
+    matched.push(
+      withSheetStats(sheet, rows, { omitSummary: true, keepCheckmarkColumns: true })
+    );
+  }
+
+  return matched.length ? matched : null;
+}
+
+/** Map free-text questions (EN/Burmese) to checkmark columns that exist in the workbook. */
+function checkmarkColumnTargets(sheets: SheetData[], query: string): string[] {
+  const knownColumns = new Set<string>();
+  for (const sheet of sheets) {
+    const marks = sheet.summary?.checkmark_columns;
+    if (!marks) {
+      continue;
+    }
+    for (const column of Object.keys(marks)) {
+      knownColumns.add(column);
+    }
+  }
+
+  const targets: string[] = [];
+  for (const column of knownColumns) {
+    if (termInHaystack(query, column)) {
+      targets.push(column);
+      continue;
+    }
+    if (/karaoke/i.test(column) && /\b(karaoke|sing|singing|singer|song)\b|သီချင်း/.test(query)) {
+      targets.push(column);
+      continue;
+    }
+    if (/volunteer/i.test(column) && /\bvolunteer\b|စေတနာ/.test(query)) {
+      targets.push(column);
+    }
+  }
+  return targets;
+}
+
+/**
+ * Checkmark questions (Karaoke 〇, Volunteer 〇, …) must scan every row.
+ * Hybrid RAG returns an arbitrary sample of × rows and drops the people who are actually checked.
+ */
+function scanCheckmarkMatches(sheets: SheetData[], query: string): SheetData[] | null {
+  const targets = checkmarkColumnTargets(sheets, query);
+  if (!targets.length) {
+    return null;
+  }
+
+  const matched: SheetData[] = [];
+  for (const sheet of sheets) {
+    const columns = targets.filter((column) => sheet.summary?.checkmark_columns?.[column]);
+    if (!columns.length) {
+      continue;
+    }
+    const rows = sheet.rows.filter((row) => columns.some((column) => isCheckedMark(row[column])));
+    if (!rows.length) {
+      continue;
+    }
+    matched.push(
+      withSheetStats(sheet, rows, { omitSummary: true, keepCheckmarkColumns: true })
+    );
   }
 
   return matched.length ? matched : null;
@@ -476,6 +556,22 @@ async function searchWorkbookUncached(
     };
   }
 
+  const checkmarkSheets = scanCheckmarkMatches(sheetsData, trimmedQuery);
+  if (checkmarkSheets) {
+    const matchCount = checkmarkSheets.reduce((sum, sheet) => sum + sheet.rows.length, 0);
+    const targets = checkmarkColumnTargets(sheetsData, trimmedQuery).join(", ");
+    return {
+      source,
+      source_type: sourceType,
+      file_name: fileName,
+      total_rows: totalRows,
+      match_count: matchCount,
+      retrieval: "checkmark",
+      answer_hint: `Complete list: ${matchCount} people checked 〇 in [${targets}]. List every Name from the returned rows. Do not treat this as a sample.`,
+      sheets: checkmarkSheets,
+    };
+  }
+
   if (!summaryOnly && ragConfig.enabled && active) {
     try {
       let documentId = options.documentId;
@@ -504,20 +600,22 @@ async function searchWorkbookUncached(
         documentId
       );
 
-      if (rag.sheets.length > 0 || rag.hits.length > 0) {
-        const detailSheets = preferPeopleRows(
-          rag.sheets.map((sheet) => {
-            const rows = sheet.rows.slice(0, limit);
-            const hasDetailRows = rows.some((row) => row.__chunk_type !== "summary");
-            return {
-              sheet: sheet.sheet,
-              numbered_item_count: hasDetailRows ? rows.length : sheet.numbered_item_count,
-              summary: hasDetailRows ? undefined : sheet.summary,
-              rows,
-            };
-          }),
-          retrievalQuery
-        );
+        if (rag.sheets.length > 0 || rag.hits.length > 0) {
+          const detailSheets = preferPeopleRows(
+            rag.sheets.map((sheet) => {
+              const rows = sheet.rows.slice(0, limit);
+              const hasDetailRows = rows.some((row) => row.__chunk_type !== "summary");
+              return {
+                sheet: sheet.sheet,
+                numbered_item_count: hasDetailRows ? rows.length : sheet.numbered_item_count,
+                summary: hasDetailRows
+                  ? checkmarkOnlySummary(sheet.summary)
+                  : sheet.summary,
+                rows,
+              };
+            }),
+            retrievalQuery
+          );
         return {
           source,
           source_type: sourceType,
@@ -585,7 +683,12 @@ async function searchWorkbookUncached(
     }
 
     matchCount += rows.length;
-    sheets.push(withSheetStats(sheet, rows.slice(0, limit), { omitSummary: true }));
+    sheets.push(
+      withSheetStats(sheet, rows.slice(0, limit), {
+        omitSummary: true,
+        keepCheckmarkColumns: true,
+      })
+    );
   }
 
   const peopleSheets = preferPeopleRows(sheets, retrievalQuery);

@@ -48,8 +48,12 @@
         "permissions": {
             "resourceSpecific": [
                 {
-                "name": "ChatMessage.Read.Chat", 
-                "type": "Application"
+                    "name": "ChatMessage.Read.Chat",
+                    "type": "Application"
+                },
+                {
+                    "name": "ChatMessage.Read.Team",
+                    "type": "Application"
                 }
             ]
         }
