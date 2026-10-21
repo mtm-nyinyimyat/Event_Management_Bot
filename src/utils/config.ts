@@ -3,6 +3,7 @@ import { ILogger } from "@microsoft/teams.common";
 import type { Fetch } from "openai/core";
 import { getEventsSource } from "../events/excelStore";
 import { assertGraphExcelConfig, describeGraphExcelConfig } from "../events/graphExcelClient";
+import { getGraphAuthMode } from "../events/graphAuth";
 import { getRagConfig } from "../rag/config";
 import { resolveVectorBackend } from "../rag/vectorStore";
 import { isPostgresConfigured, resolveDatabaseType } from "../storage/postgres";
@@ -377,6 +378,43 @@ export function validateEnvironment(logger: ILogger): void {
     (process.env.EVENTS_SESSION_MODE || "1").trim().toLowerCase()
   );
   const ingestMode = (process.env.EVENTS_INGEST_MODE || "upload").trim().toLowerCase();
+  if (getGraphAuthMode() === "sso") {
+    const missing: string[] = [];
+    if (!(process.env.CLIENT_ID || process.env.GRAPH_CLIENT_ID)?.trim()) {
+      missing.push("CLIENT_ID");
+    }
+    if (!(process.env.CLIENT_SECRET || process.env.GRAPH_CLIENT_SECRET)?.trim()) {
+      missing.push("CLIENT_SECRET");
+    }
+    if (!(process.env.TENANT_ID || process.env.GRAPH_TENANT_ID)?.trim()) {
+      missing.push("TENANT_ID");
+    }
+    if (
+      !process.env.PUBLIC_BASE_URL?.trim() &&
+      !process.env.BOT_ENDPOINT?.trim() &&
+      !process.env.WEBSITE_HOSTNAME?.trim() &&
+      !process.env.GRAPH_WEBHOOK_URL?.trim()
+    ) {
+      missing.push("PUBLIC_BASE_URL");
+    }
+    if (
+      ingestMode === "sharepoint" ||
+      process.env.EVENTS_GRAPH_DRIVE_ID?.trim() ||
+      process.env.GRAPH_WEBHOOK_URL?.trim()
+    ) {
+      if (!process.env.GRAPH_OPERATOR_USER_ID?.trim()) {
+        missing.push("GRAPH_OPERATOR_USER_ID");
+      }
+    }
+    if (missing.length) {
+      throw new Error(
+        `GRAPH_AUTH_MODE=sso requires: ${missing.join(", ")}. ` +
+          "See docs/SSO_SETUP.md (Entra-only; no Azure Bot OAuth connection)."
+      );
+    }
+    logger.debug("🔐 Graph auth: Entra SSO + OBO (no Azure Bot OAuth connection)");
+  }
+
   if (sessionMode) {
     logger.debug(
       `📄 Excel source: session mode via ${ingestMode === "sharepoint" || ingestMode === "url" ? "SharePoint URL" : "chat file upload"} (EVENTS_INGEST_MODE=${ingestMode || "upload"})`

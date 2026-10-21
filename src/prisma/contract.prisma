@@ -121,3 +121,15 @@ model RagChunk {
   @@index([documentId, sheet], map: "idx_rag_chunks_sheet")
   @@map("rag_chunks")
 }
+
+/// Per-user Microsoft Graph tokens from Teams SSO + OBO (access ~1h, refresh ~90d).
+model GraphUserToken {
+  userId       String            @id @map("user_id")
+  accessToken  String            @map("access_token")
+  refreshToken String?           @map("refresh_token")
+  expiresAt    TimestamptzString @map("expires_at")
+  scope        String            @default("")
+  updatedAt    TimestamptzString @default(now()) @map("updated_at")
+
+  @@map("graph_user_tokens")
+}

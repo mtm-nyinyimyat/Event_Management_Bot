@@ -1,4 +1,4 @@
-import { getGraphAccessToken } from "./graphAuth";
+import { getGraphAccessToken, getGraphAuthMode } from "./graphAuth";
 
 export interface GraphDriveItem {
   id: string;
@@ -44,6 +44,7 @@ function requireEnv(name: string): string {
 }
 
 async function getGraphToken(): Promise<string> {
+  // userId comes from AsyncLocalStorage (message) or GRAPH_OPERATOR_USER_ID (background).
   return getGraphAccessToken();
 }
 
@@ -56,22 +57,41 @@ async function resolveUserDriveId(configured: string): Promise<string> {
     "https://graph.microsoft.com/v1.0/me/drive?$select=id"
   );
   if (!drive?.id) {
-    throw new Error("Could not resolve personal OneDrive (/me/drive). Complete device login first.");
+    throw new Error(
+      "Could not resolve personal OneDrive (/me/drive). Complete Teams SSO first."
+    );
   }
   return drive.id;
 }
 
+function describeFetchFailure(error: unknown, url: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const cause =
+    error instanceof Error && error.cause instanceof Error
+      ? error.cause.message
+      : error instanceof Error && error.cause
+        ? String(error.cause)
+        : "";
+  const detail = cause ? `${message} (${cause})` : message;
+  return `Graph fetch failed for ${url}: ${detail}`;
+}
+
 async function graphFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const accessToken = await getGraphToken();
-  const response = await fetch(url, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: "application/json",
-      ...(init?.headers || {}),
-    },
-    redirect: "follow",
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+        ...(init?.headers || {}),
+      },
+      redirect: "follow",
+    });
+  } catch (error) {
+    throw new Error(describeFetchFailure(error, url));
+  }
 
   if (!response.ok) {
     const body = await response.text();
@@ -354,9 +374,22 @@ interface SharedDriveItem extends GraphDriveItem {
 
 async function getItemByShareUrl(shareUrl: string): Promise<SharedDriveItem> {
   const encoded = encodeSharingUrl(shareUrl);
-  return graphFetch<SharedDriveItem>(
-    `https://graph.microsoft.com/v1.0/shares/${encoded}/driveItem?$select=id,name,webUrl,lastModifiedDateTime,size,eTag,cTag,file,folder,parentReference`
-  );
+  try {
+    return await graphFetch<SharedDriveItem>(
+      `https://graph.microsoft.com/v1.0/shares/${encoded}/driveItem?$select=id,name,webUrl,lastModifiedDateTime,size,eTag,cTag,file,folder,parentReference`
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/\(401\)|\(403\)/.test(message)) {
+      throw new Error(
+        `${message}\n` +
+          "SharePoint /shares needs delegated Files.Read.All (and usually Sites.Read.All). " +
+          "Add those Graph permissions in Entra, admin-consent if required, then clear " +
+          "graph_user_tokens for this user and sign in again so the new scopes are granted."
+      );
+    }
+    throw error;
+  }
 }
 
 function isExcelItem(item: GraphDriveItem): boolean {
@@ -592,6 +625,16 @@ export function assertGraphExcelConfig(): void {
   requireEnv("CLIENT_SECRET");
   requireEnv("TENANT_ID");
 
+  if (getGraphAuthMode() === "sso") {
+    if (
+      process.env.EVENTS_GRAPH_DRIVE_ID?.trim() ||
+      process.env.GRAPH_WEBHOOK_URL?.trim() ||
+      (process.env.EVENTS_INGEST_MODE || "").trim().toLowerCase() === "sharepoint"
+    ) {
+      requireEnv("GRAPH_OPERATOR_USER_ID");
+    }
+  }
+
   const allowed = getAllowedExcelTargets();
   if (allowed.length === 0) {
     throw new Error(
@@ -719,7 +762,12 @@ export async function downloadExcelBinaryFromDriveItem(
   const fileName = preferredFileName || meta.name || "workbook.xlsx";
   const downloadUrl = meta["@microsoft.graph.downloadUrl"];
   if (downloadUrl) {
-    const response = await fetch(downloadUrl, { redirect: "follow" });
+    let response: Response;
+    try {
+      response = await fetch(downloadUrl, { redirect: "follow" });
+    } catch (error) {
+      throw new Error(describeFetchFailure(error, downloadUrl.split("?")[0] || downloadUrl));
+    }
     if (!response.ok) {
       throw new Error(`Failed to download Excel (${response.status})`);
     }

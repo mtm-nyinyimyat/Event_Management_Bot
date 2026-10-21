@@ -1,29 +1,39 @@
 import { ClientSecretCredential } from "@azure/identity";
-import fs from "node:fs";
-import path from "node:path";
+import {
+  ConfidentialClientApplication,
+  type AuthenticationResult,
+  type Configuration,
+} from "@azure/msal-node";
+import { getGraphAuthUserId } from "./graphAuthContext";
+import {
+  clearStoredGraphTokens,
+  getStoredGraphTokens,
+  saveStoredGraphTokens,
+} from "./graphTokenStore";
 
-export type GraphAuthMode = "app" | "delegated";
+export type GraphAuthMode = "app" | "sso";
 
 const APP_SCOPE = "https://graph.microsoft.com/.default";
-const CACHE_FILE = path.join(process.cwd(), ".graph-token-cache.json");
+const SKEW_MS = 120_000;
 
-interface CachedDelegatedTokens {
+export class GraphAuthRequiredError extends Error {
+  readonly userId: string;
+
+  constructor(userId: string, message?: string) {
+    super(message || `Graph SSO required for user ${userId}`);
+    this.name = "GraphAuthRequiredError";
+    this.userId = userId;
+  }
+}
+
+interface TokenBundle {
   accessToken: string;
   refreshToken?: string;
   expiresAt: number;
   scope: string;
 }
 
-interface DeviceCodeResponse {
-  device_code: string;
-  user_code: string;
-  verification_uri: string;
-  expires_in: number;
-  interval?: number;
-  message?: string;
-}
-
-interface TokenResponse {
+interface RawTokenResponse {
   access_token?: string;
   refresh_token?: string;
   expires_in?: number;
@@ -32,19 +42,22 @@ interface TokenResponse {
   error_description?: string;
 }
 
-let memoryCache: CachedDelegatedTokens | null = null;
-let inflight: Promise<string> | null = null;
-let devicePrompt: ((message: string) => void) | null = null;
+const inflightByUser = new Map<string, Promise<string>>();
+let msalApp: ConfidentialClientApplication | null = null;
 
 export function getGraphAuthMode(): GraphAuthMode {
   const raw = (process.env.GRAPH_AUTH_MODE || "app").trim().toLowerCase();
-  return raw === "delegated" || raw === "device" || raw === "user" ? "delegated" : "app";
+  // Legacy aliases from device-login era; all map to Entra SSO + OBO.
+  if (raw === "sso" || raw === "delegated" || raw === "device" || raw === "user") {
+    return "sso";
+  }
+  return "app";
 }
 
 function tenantId(): string {
   const value = process.env.TENANT_ID || process.env.GRAPH_TENANT_ID;
   if (!value?.trim()) {
-    throw new Error("Device login needs TENANT_ID (Entra tenant of the OneDrive account).");
+    throw new Error("Graph SSO needs TENANT_ID.");
   }
   return value.trim();
 }
@@ -52,67 +65,129 @@ function tenantId(): string {
 function clientId(): string {
   const value = process.env.CLIENT_ID || process.env.GRAPH_CLIENT_ID;
   if (!value?.trim()) {
-    throw new Error("Device login needs CLIENT_ID.");
+    throw new Error("Graph SSO needs CLIENT_ID.");
   }
   return value.trim();
 }
 
-function clientSecret(): string | undefined {
+function clientSecret(): string {
   const value = process.env.CLIENT_SECRET || process.env.GRAPH_CLIENT_SECRET;
-  return value?.trim() || undefined;
+  if (!value?.trim()) {
+    throw new Error("Graph SSO/OBO needs CLIENT_SECRET (confidential client).");
+  }
+  return value.trim();
 }
 
 /**
- * Delegated scopes for the signed-in user's OneDrive.
- * Files.Read covers personal /me files. Override with GRAPH_DELEGATED_SCOPES if needed.
+ * Delegated Graph scopes for OBO / refresh.
+ * Override with GRAPH_DELEGATED_SCOPES (space-separated).
  */
-function delegatedScopeString(): string {
+export function delegatedScopeString(): string {
   const raw = process.env.GRAPH_DELEGATED_SCOPES?.trim();
   if (raw) {
     return raw;
   }
   return [
-    "https://graph.microsoft.com/Files.Read",
+    "https://graph.microsoft.com/Files.Read.All",
+    "https://graph.microsoft.com/Sites.Read.All",
     "https://graph.microsoft.com/User.Read",
+    "https://graph.microsoft.com/Files.Read",
     "offline_access",
   ].join(" ");
+}
+
+function delegatedScopesForMsal(): string[] {
+  return delegatedScopeString()
+    .split(/\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s && s !== "offline_access");
 }
 
 function tokenEndpoint(): string {
   return `https://login.microsoftonline.com/${tenantId()}/oauth2/v2.0/token`;
 }
 
-function loadCache(): CachedDelegatedTokens | null {
-  if (memoryCache) {
-    return memoryCache;
+export function getGraphOperatorUserId(): string {
+  const value = process.env.GRAPH_OPERATOR_USER_ID?.trim();
+  if (!value) {
+    throw new Error(
+      "Set GRAPH_OPERATOR_USER_ID to the operator Entra object id used for background Graph jobs."
+    );
   }
-  try {
-    if (!fs.existsSync(CACHE_FILE)) {
-      return null;
-    }
-    const parsed = JSON.parse(fs.readFileSync(CACHE_FILE, "utf8")) as CachedDelegatedTokens;
-    if (parsed?.accessToken && parsed.expiresAt) {
-      memoryCache = parsed;
-      return parsed;
-    }
-  } catch {
-    // ignore corrupt cache
-  }
-  return null;
+  return value;
 }
 
-function saveCache(tokens: CachedDelegatedTokens): void {
-  memoryCache = tokens;
-  try {
-    fs.writeFileSync(CACHE_FILE, JSON.stringify(tokens), { mode: 0o600 });
-  } catch {
-    // non-fatal
-  }
+export function getGraphTokenExchangeResourceUri(): string {
+  const botId = (process.env.BOT_ID || process.env.CLIENT_ID || clientId()).trim();
+  const configured = process.env.GRAPH_SSO_RESOURCE_URI?.trim();
+  return configured || `api://botid-${botId}`;
 }
 
-function tokensFromResponse(body: TokenResponse, fallbackScope: string): CachedDelegatedTokens {
+/** Public HTTPS origin for /auth/start and /auth/end (tunnel or deployed host). */
+export function getPublicBaseUrl(): string {
+  const explicit =
+    process.env.PUBLIC_BASE_URL?.trim() ||
+    process.env.BOT_ENDPOINT?.trim() ||
+    process.env.WEBSITE_HOSTNAME?.trim();
+  if (explicit) {
+    return /^https?:\/\//i.test(explicit)
+      ? explicit.replace(/\/+$/, "")
+      : `https://${explicit.replace(/\/+$/, "")}`;
+  }
+  const webhook = process.env.GRAPH_WEBHOOK_URL?.trim();
+  if (webhook) {
+    try {
+      return new URL(webhook).origin;
+    } catch {
+      // fall through
+    }
+  }
+  throw new Error(
+    "Set PUBLIC_BASE_URL (or BOT_ENDPOINT) to your public HTTPS origin for Entra auth redirects."
+  );
+}
+
+export function getAuthRedirectUri(): string {
+  return `${getPublicBaseUrl()}/auth/end`;
+}
+
+export function getAuthStartUrl(userId: string): string {
+  const url = new URL(`${getPublicBaseUrl()}/auth/start`);
+  url.searchParams.set("userId", userId);
+  return url.toString();
+}
+
+function getMsalApp(): ConfidentialClientApplication {
+  if (!msalApp) {
+    const config: Configuration = {
+      auth: {
+        clientId: clientId(),
+        authority: `https://login.microsoftonline.com/${tenantId()}`,
+        clientSecret: clientSecret(),
+      },
+    };
+    msalApp = new ConfidentialClientApplication(config);
+  }
+  return msalApp;
+}
+
+function bundleFromMsal(result: AuthenticationResult, fallbackScope: string): TokenBundle {
+  if (!result.accessToken) {
+    throw new Error("MSAL OBO response missing accessToken");
+  }
+  const expiresAt = result.expiresOn
+    ? result.expiresOn.getTime() - SKEW_MS
+    : Date.now() + 3600 * 1000 - SKEW_MS;
+  return {
+    accessToken: result.accessToken,
+    expiresAt,
+    scope: result.scopes?.join(" ") || fallbackScope,
+  };
+}
+
+function bundleFromRaw(body: RawTokenResponse, fallbackScope: string): TokenBundle {
   if (!body.access_token) {
-    throw new Error(body.error_description || body.error || "Graph token response missing access_token");
+    throw new Error(body.error_description || body.error || "Token response missing access_token");
   }
   return {
     accessToken: body.access_token,
@@ -122,122 +197,147 @@ function tokensFromResponse(body: TokenResponse, fallbackScope: string): CachedD
   };
 }
 
-async function postForm(url: string, fields: Record<string, string>): Promise<TokenResponse> {
+async function postForm(url: string, fields: Record<string, string>): Promise<RawTokenResponse> {
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams(fields),
   });
-  return (await response.json()) as TokenResponse;
+  return (await response.json()) as RawTokenResponse;
 }
 
-async function refreshDelegated(refreshToken: string, scope: string): Promise<CachedDelegatedTokens> {
-  const fields: Record<string, string> = {
+/**
+ * OBO: raw token endpoint (captures refresh_token with offline_access).
+ * Falls back to MSAL OBO if the raw call fails.
+ */
+export async function exchangeSsoTokenForGraph(ssoAssertion: string): Promise<TokenBundle> {
+  const scope = delegatedScopeString();
+
+  const raw = await postForm(tokenEndpoint(), {
     client_id: clientId(),
+    client_secret: clientSecret(),
+    grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+    assertion: ssoAssertion,
+    requested_token_use: "on_behalf_of",
+    scope,
+  });
+  if (raw.access_token && !raw.error) {
+    return bundleFromRaw(raw, scope);
+  }
+
+  const msalResult = await getMsalApp().acquireTokenOnBehalfOf({
+    oboAssertion: ssoAssertion,
+    scopes: delegatedScopesForMsal(),
+  });
+  if (!msalResult?.accessToken) {
+    throw new Error(
+      raw.error_description ||
+        raw.error ||
+        "On-Behalf-Of failed to return an access token"
+    );
+  }
+  return bundleFromMsal(msalResult, scope);
+}
+
+/**
+ * Authorization-code grant (consent fallback). Returns Graph access + refresh directly.
+ */
+export async function exchangeAuthorizationCodeForGraph(
+  code: string,
+  redirectUri: string
+): Promise<TokenBundle> {
+  const scope = delegatedScopeString();
+  const body = await postForm(tokenEndpoint(), {
+    client_id: clientId(),
+    client_secret: clientSecret(),
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: redirectUri,
+    scope,
+  });
+  if (body.error || !body.access_token) {
+    throw new Error(body.error_description || body.error || "Authorization code exchange failed");
+  }
+  return bundleFromRaw(body, scope);
+}
+
+/** Build Entra authorize URL for interactive consent. */
+export function buildEntraAuthorizeUrl(state: string): string {
+  const url = new URL(
+    `https://login.microsoftonline.com/${tenantId()}/oauth2/v2.0/authorize`
+  );
+  url.searchParams.set("client_id", clientId());
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("redirect_uri", getAuthRedirectUri());
+  url.searchParams.set("response_mode", "query");
+  url.searchParams.set("scope", delegatedScopeString());
+  url.searchParams.set("state", state);
+  url.searchParams.set("prompt", "select_account");
+  return url.toString();
+}
+
+export async function refreshGraphTokens(refreshToken: string): Promise<TokenBundle> {
+  const scope = delegatedScopeString();
+
+  try {
+    const result = await getMsalApp().acquireTokenByRefreshToken({
+      refreshToken,
+      scopes: delegatedScopesForMsal(),
+    });
+    if (result?.accessToken) {
+      const bundle = bundleFromMsal(result, scope);
+      bundle.refreshToken = refreshToken;
+      return bundle;
+    }
+  } catch {
+    // fall through to raw refresh
+  }
+
+  const body = await postForm(tokenEndpoint(), {
+    client_id: clientId(),
+    client_secret: clientSecret(),
     grant_type: "refresh_token",
     refresh_token: refreshToken,
     scope,
-  };
-  const secret = clientSecret();
-  if (secret) {
-    fields.client_secret = secret;
-  }
-  let body = await postForm(tokenEndpoint(), fields);
-  if (body.error === "invalid_client" || /public client/i.test(body.error_description || "")) {
-    delete fields.client_secret;
-    body = await postForm(tokenEndpoint(), fields);
-  }
+  });
   if (body.error) {
     throw new Error(body.error_description || body.error);
   }
-  const tokens = tokensFromResponse(body, scope);
+  const tokens = bundleFromRaw(body, scope);
   if (!tokens.refreshToken) {
     tokens.refreshToken = refreshToken;
   }
-  saveCache(tokens);
   return tokens;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+export async function saveUserGraphTokens(
+  userId: string,
+  tokens: TokenBundle
+): Promise<void> {
+  await saveStoredGraphTokens({
+    userId,
+    accessToken: tokens.accessToken,
+    refreshToken: tokens.refreshToken ?? null,
+    expiresAt: tokens.expiresAt,
+    scope: tokens.scope,
+  });
 }
 
-async function deviceCodeLogin(onPrompt: (message: string) => void): Promise<CachedDelegatedTokens> {
-  const scope = delegatedScopeString();
-  const start = await fetch(
-    `https://login.microsoftonline.com/${tenantId()}/oauth2/v2.0/devicecode`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        client_id: clientId(),
-        scope,
-      }),
-    }
-  );
-  const device = (await start.json()) as DeviceCodeResponse & TokenResponse;
-  if (!start.ok || !device.device_code || device.error) {
-    throw new Error(
-      device.error_description ||
-        device.error ||
-        "Failed to start device login. In Entra, enable Authentication → Allow public client flows."
-    );
-  }
-
-  const message =
-    device.message ||
-    `To sign in to personal OneDrive, open ${device.verification_uri} and enter code ${device.user_code}`;
-  onPrompt(message);
-
-  const deadline = Date.now() + (device.expires_in || 900) * 1000;
-  let waitMs = Math.max(5, device.interval || 5) * 1000;
-  const secret = clientSecret();
-
-  while (Date.now() < deadline) {
-    await sleep(waitMs);
-    const fields: Record<string, string> = {
-      grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-      client_id: clientId(),
-      device_code: device.device_code,
-    };
-    if (secret) {
-      fields.client_secret = secret;
-    }
-    let body = await postForm(tokenEndpoint(), fields);
-    if (
-      secret &&
-      (body.error === "invalid_client" || /public client|AADSTS700025/i.test(body.error_description || ""))
-    ) {
-      delete fields.client_secret;
-      body = await postForm(tokenEndpoint(), fields);
-    }
-
-    if (body.access_token) {
-      const tokens = tokensFromResponse(body, scope);
-      saveCache(tokens);
-      return tokens;
-    }
-
-    const error = body.error || "";
-    if (error === "authorization_pending") {
-      continue;
-    }
-    if (error === "slow_down") {
-      waitMs += 5000;
-      continue;
-    }
-    throw new Error(body.error_description || error || "Device login failed");
-  }
-
-  throw new Error("Device login timed out before the code was entered.");
+export async function clearUserGraphTokens(userId: string): Promise<void> {
+  await clearStoredGraphTokens(userId);
 }
 
 async function acquireAppToken(): Promise<string> {
-  const secret = clientSecret();
-  if (!secret) {
-    throw new Error("App-only Graph auth needs CLIENT_SECRET. Set GRAPH_AUTH_MODE=delegated for device login.");
+  const secret = process.env.CLIENT_SECRET || process.env.GRAPH_CLIENT_SECRET;
+  if (!secret?.trim()) {
+    throw new Error("App-only Graph auth needs CLIENT_SECRET.");
   }
-  const credential = new ClientSecretCredential(tenantId(), clientId(), secret);
+  const tid = process.env.TENANT_ID || process.env.GRAPH_TENANT_ID;
+  const cid = process.env.CLIENT_ID || process.env.GRAPH_CLIENT_ID;
+  if (!tid?.trim() || !cid?.trim()) {
+    throw new Error("App-only Graph auth needs TENANT_ID and CLIENT_ID.");
+  }
+  const credential = new ClientSecretCredential(tid.trim(), cid.trim(), secret.trim());
   const token = await credential.getToken(APP_SCOPE);
   if (!token?.token) {
     throw new Error("Failed to acquire Microsoft Graph app token");
@@ -245,56 +345,108 @@ async function acquireAppToken(): Promise<string> {
   return token.token;
 }
 
-async function acquireDelegatedToken(): Promise<string> {
-  const scope = delegatedScopeString();
-  const cached = loadCache();
-  if (cached && cached.expiresAt > Date.now() && (!cached.scope || cached.scope === scope)) {
+async function acquireSsoTokenForUser(userId: string): Promise<string> {
+  const cached = await getStoredGraphTokens(userId);
+  if (cached && cached.expiresAt > Date.now() && cached.accessToken) {
     return cached.accessToken;
   }
   if (cached?.refreshToken) {
     try {
-      const refreshed = await refreshDelegated(cached.refreshToken, scope);
+      const refreshed = await refreshGraphTokens(cached.refreshToken);
+      await saveUserGraphTokens(userId, refreshed);
       return refreshed.accessToken;
     } catch {
-      // fall through to a new device login
+      await clearStoredGraphTokens(userId);
     }
+  } else if (cached) {
+    // Expired access with no refresh (e.g. offline_access never granted) — drop the row
+    // so SSO checks don't treat the user as already signed in.
+    await clearStoredGraphTokens(userId);
   }
-  const tokens = await deviceCodeLogin(
-    devicePrompt ||
-      ((message) => {
-        console.log(`\n${message}\n`);
-      })
+  throw new GraphAuthRequiredError(
+    userId,
+    `No valid Graph token for user ${userId}. Complete Teams SSO first.`
   );
-  return tokens.accessToken;
 }
 
-export async function getGraphAccessToken(): Promise<string> {
-  if (getGraphAuthMode() !== "delegated") {
+/**
+ * Resolve a Graph access token.
+ * - app mode: client credentials
+ * - sso mode: per-user store (userId arg, AsyncLocalStorage, or operator)
+ */
+export async function getGraphAccessToken(userId?: string): Promise<string> {
+  if (getGraphAuthMode() !== "sso") {
     return acquireAppToken();
   }
-  if (!inflight) {
-    inflight = acquireDelegatedToken().finally(() => {
-      inflight = null;
-    });
+
+  const resolved =
+    userId?.trim() ||
+    getGraphAuthUserId()?.trim() ||
+    process.env.GRAPH_OPERATOR_USER_ID?.trim();
+
+  if (!resolved) {
+    throw new GraphAuthRequiredError(
+      "(unknown)",
+      "SSO Graph calls need a userId (set Graph auth context or GRAPH_OPERATOR_USER_ID)."
+    );
   }
-  return inflight;
+
+  const existing = inflightByUser.get(resolved);
+  if (existing) {
+    return existing;
+  }
+  const pending = acquireSsoTokenForUser(resolved).finally(() => {
+    inflightByUser.delete(resolved);
+  });
+  inflightByUser.set(resolved, pending);
+  return pending;
 }
 
-/** Prompt for device login at startup when delegated mode is on. */
-export async function ensureGraphAuthReady(
-  log?: (message: string) => void
-): Promise<void> {
-  if (getGraphAuthMode() !== "delegated") {
-    return;
+export async function getOperatorGraphAccessToken(): Promise<string> {
+  return getGraphAccessToken(getGraphOperatorUserId());
+}
+
+/**
+ * True when SSO mode is on and the user can obtain a Graph token now
+ * (unexpired access, or a refresh token that still works).
+ * Stale rows with expired access and no refresh are cleared.
+ */
+export async function userHasGraphAuth(userId: string): Promise<boolean> {
+  if (getGraphAuthMode() !== "sso") {
+    return true;
   }
-  devicePrompt = (message) => {
-    console.log(`\n${message}\n`);
-    log?.(message);
-  };
   try {
-    await getGraphAccessToken();
-    log?.("Personal OneDrive device login ready");
-  } finally {
-    devicePrompt = null;
+    await getGraphAccessToken(userId);
+    return true;
+  } catch (error) {
+    if (error instanceof GraphAuthRequiredError) {
+      return false;
+    }
+    throw error;
   }
+}
+
+/**
+ * Ensure the user can call Graph. Throws GraphAuthRequiredError when SSO sign-in is needed.
+ */
+export async function ensureUserGraphAuth(userId: string): Promise<string> {
+  if (getGraphAuthMode() !== "sso") {
+    return getGraphAccessToken();
+  }
+  if (!userId?.trim()) {
+    throw new GraphAuthRequiredError("(unknown)", "Missing user id for Graph SSO");
+  }
+  return getGraphAccessToken(userId.trim());
+}
+
+/**
+ * Exchange a Teams SSO assertion, persist tokens for the user, return access token.
+ */
+export async function completeSsoTokenExchange(
+  userId: string,
+  ssoAssertion: string
+): Promise<string> {
+  const tokens = await exchangeSsoTokenForGraph(ssoAssertion);
+  await saveUserGraphTokens(userId, tokens);
+  return tokens.accessToken;
 }

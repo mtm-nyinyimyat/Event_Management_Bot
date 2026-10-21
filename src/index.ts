@@ -40,7 +40,21 @@ import {
   runDeltaSyncTick,
   startDeltaPolling,
 } from "./events/deltaSync";
-import { ensureGraphAuthReady, getGraphAuthMode } from "./events/graphAuth";
+import {
+  completeSsoTokenExchange,
+  getAuthStartUrl,
+  getGraphAuthMode,
+  getGraphOperatorUserId,
+  GraphAuthRequiredError,
+  userHasGraphAuth,
+} from "./events/graphAuth";
+import { runWithGraphAuthUserAsync } from "./events/graphAuthContext";
+import { ensureGraphTokenSchema } from "./events/graphTokenStore";
+import { registerEntraAuthRoutes } from "./events/entraAuthRoutes";
+import {
+  buildGraphSsoOAuthCard,
+  extractTokenExchangeAssertion,
+} from "./events/teamsSso";
 import {
   registerGraphWebhookRoutes,
   setGraphWebhookChangeHandler,
@@ -99,12 +113,18 @@ const options =
 const app = new App({
   ...options,
   logger,
+  applicationIdUri:
+    process.env.GRAPH_SSO_RESOURCE_URI?.trim() ||
+    (process.env.BOT_ID || process.env.CLIENT_ID
+      ? `api://botid-${process.env.BOT_ID || process.env.CLIENT_ID}`
+      : undefined),
   // JWT check fetches login.botframework.com. If that host is blocked, set SKIP_BOT_AUTH=1 locally.
   skipAuth: !process.env.CLIENT_ID || process.env.SKIP_BOT_AUTH === "1",
 });
 
 const webhookLogger = logger.child("graph-webhook");
 registerGraphWebhookRoutes(app, webhookLogger);
+registerEntraAuthRoutes(app, logger.child("entra-auth"));
 setGraphWebhookChangeHandler((log) => {
   void runDeltaSyncTick(log || webhookLogger).catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
@@ -115,6 +135,111 @@ setGraphWebhookChangeHandler((log) => {
 // Initialize storage
 let storage: IDatabase;
 let feedbackStorage: IDatabase;
+
+function resolveActivityUserId(activity: {
+  from?: { aadObjectId?: string; id?: string };
+}): string {
+  return activity.from?.aadObjectId || activity.from?.id || "";
+}
+
+async function promptGraphSso(
+  send: (activity: ActivityLike) => Promise<unknown>,
+  userId: string,
+  log: ILogger
+): Promise<void> {
+  try {
+    await send(buildGraphSsoOAuthCard({ userId }));
+    log.debug("Sent Teams SSO card (tokenExchange + /auth/start fallback)");
+  } catch (error) {
+    log.error(
+      `Failed to send SSO card: ${error instanceof Error ? error.message : String(error)}`
+    );
+    try {
+      const startUrl = getAuthStartUrl(userId);
+      await send(
+        `Please sign in so I can access Microsoft 365 on your behalf:\n${startUrl}`
+      );
+    } catch {
+      await send(
+        "Please sign in so I can access Microsoft 365 on your behalf. " +
+          "Set PUBLIC_BASE_URL (HTTPS tunnel) for the sign-in link."
+      );
+    }
+  }
+}
+
+/**
+ * Ensure Graph SSO tokens exist for this user when GRAPH_AUTH_MODE=sso.
+ * Returns false when an OAuth card was sent and the caller should stop.
+ */
+async function ensureMessageGraphAuth(
+  send: (activity: ActivityLike) => Promise<unknown>,
+  userId: string,
+  log: ILogger
+): Promise<boolean> {
+  if (getGraphAuthMode() !== "sso") {
+    return true;
+  }
+  if (!userId) {
+    log.warn("Cannot start Graph SSO: missing activity.from.aadObjectId");
+    return true;
+  }
+  // Validates / refreshes the stored token — not merely that a DB row exists.
+  if (await userHasGraphAuth(userId)) {
+    return true;
+  }
+  log.debug(`No usable Graph SSO token for ${userId}; sending sign-in card`);
+  await promptGraphSso(send, userId, log);
+  return false;
+}
+
+app.on("signin.token-exchange", async ({ activity, log }) => {
+  const userId = resolveActivityUserId(activity);
+  const assertion = extractTokenExchangeAssertion(activity);
+  const connectionName =
+    (activity.value as { connectionName?: string } | undefined)?.connectionName ||
+    "GraphSSO";
+  const exchangeId =
+    (activity.value as { id?: string } | undefined)?.id || "token-exchange";
+
+  if (!userId || !assertion) {
+    log.warn("signin.token-exchange missing userId or token");
+    return {
+      status: 412,
+      body: {
+        id: exchangeId,
+        connectionName,
+        failureDetail: "missing user or SSO token",
+      },
+    };
+  }
+
+  try {
+    await completeSsoTokenExchange(userId, assertion);
+    log.debug(`Graph SSO OBO complete for user ${userId}`);
+    return { status: 200 };
+  } catch (error) {
+    log.error(
+      `Graph SSO OBO failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return {
+      status: 412,
+      body: {
+        id: exchangeId,
+        connectionName,
+        failureDetail: "unable to exchange token for Graph",
+      },
+    };
+  }
+});
+
+/** Consent is handled by /auth/start → /auth/end (Entra auth code), not Bot Framework verify-state. */
+app.on("signin.verify-state", async ({ log }) => {
+  log.debug(
+    "signin.verify-state ignored — use Entra /auth/start consent fallback (no Azure Bot OAuth)"
+  );
+  return { status: 200 };
+});
 
 app.on("message.submit.feedback", async ({ activity }) => {
   try {
@@ -278,6 +403,9 @@ app.on("message", async ({ send, activity, api }) => {
     ? await createMessageContext(storage, activity, api)
     : await createMessageContext(storage, activity);
 
+  const graphUserId = context.userId || resolveActivityUserId(activity);
+
+  await runWithGraphAuthUserAsync(graphUserId || "anonymous", async () => {
   let trackedMessages;
 
   if (shouldHandle) {
@@ -288,6 +416,14 @@ app.on("message", async ({ send, activity, api }) => {
     }
 
     try {
+      // SharePoint ingest needs Graph SSO before URL staging / start.
+      if (getGraphAuthMode() === "sso" && getEventIngestMode() === "sharepoint") {
+        const ok = await ensureMessageGraphAuth(send, graphUserId, logger);
+        if (!ok) {
+          return;
+        }
+      }
+
       // Channel posts: BF payload often lacks preview/file links — re-read via Graph.
       const graphMessage = await fetchGraphMessageSafe(activity);
       const activityText = graphMessage?.body?.content || activity.text;
@@ -512,6 +648,10 @@ app.on("message", async ({ send, activity, api }) => {
         }
       }
     } catch (error) {
+      if (error instanceof GraphAuthRequiredError) {
+        await promptGraphSso(send, error.userId || graphUserId, logger);
+        trackedMessages = createMessageRecords([activity]);
+      } else {
       const detail = describeNetworkError(error);
       logger.error(`❌ Failed to handle/reply to message: ${detail}`);
       if (isOutboundBlocked(error)) {
@@ -523,6 +663,7 @@ app.on("message", async ({ send, activity, api }) => {
       }
       await sendServiceUnavailable(send, error, logger, context);
       trackedMessages = createMessageRecords([activity]);
+      }
     }
   } else {
     trackedMessages = createMessageRecords([activity]);
@@ -530,6 +671,7 @@ app.on("message", async ({ send, activity, api }) => {
 
   logger.debug(trackedMessages);
   await context.memory.addMessages(trackedMessages);
+  });
 });
 
 app.on("file.consent.accept", async ({ activity, send }) => {
@@ -623,12 +765,33 @@ app.on("install.add", async ({ send }) => {
     logger.debug(
       `📎 Event ingest mode: ${getEventIngestMode()} (set EVENTS_INGEST_MODE=sharepoint to use SharePoint URLs)`
     );
-    if (
-      getGraphAuthMode() === "delegated" &&
-      (getEventIngestMode() === "sharepoint" || Boolean(process.env.EVENTS_GRAPH_DRIVE_ID?.trim()))
-    ) {
-      logger.debug("Graph delegated auth: waiting for personal OneDrive device login if needed");
-      await ensureGraphAuthReady((message) => logger.debug(message));
+    if (getGraphAuthMode() === "sso") {
+      await ensureGraphTokenSchema();
+      logger.debug(
+        "Graph auth mode: SSO (Teams Native SSO → OBO). Device login is disabled."
+      );
+      if (
+        getEventIngestMode() === "sharepoint" ||
+        Boolean(process.env.EVENTS_GRAPH_DRIVE_ID?.trim()) ||
+        Boolean(process.env.GRAPH_WEBHOOK_URL?.trim())
+      ) {
+        try {
+          const operatorId = getGraphOperatorUserId();
+          const ready = await userHasGraphAuth(operatorId);
+          if (!ready) {
+            logger.warn(
+              `Graph operator ${operatorId} has no stored SSO tokens yet. ` +
+                "Have the operator message the bot in Teams once to complete SSO before delta/webhook Graph calls work."
+            );
+          } else {
+            logger.debug(`Graph operator ${operatorId} has stored tokens for background jobs`);
+          }
+        } catch (error) {
+          logger.warn(
+            `GRAPH_OPERATOR_USER_ID not ready: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+      }
     }
     logger.debug("✅ Storage initialized successfully");
   } catch (error) {

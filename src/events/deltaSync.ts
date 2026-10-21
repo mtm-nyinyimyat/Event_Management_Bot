@@ -22,6 +22,13 @@ import {
   type SheetData,
 } from "./excelStore";
 import {
+  getGraphAuthMode,
+  getGraphOperatorUserId,
+  GraphAuthRequiredError,
+  userHasGraphAuth,
+} from "./graphAuth";
+import { runWithGraphAuthUserAsync } from "./graphAuthContext";
+import {
   createGraphSubscription,
   downloadExcelBinaryFromDriveItem,
   getDeltaChanges,
@@ -38,6 +45,42 @@ const RENEW_WITHIN_MS = 6 * 60 * 60 * 1000;
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let pollInFlight = false;
+
+/** Run Graph work as the configured operator when GRAPH_AUTH_MODE=sso. */
+async function withOperatorGraphAuth<T>(
+  logger: ILogger | undefined,
+  fn: () => Promise<T>
+): Promise<T | undefined> {
+  if (getGraphAuthMode() !== "sso") {
+    return fn();
+  }
+  let operatorId: string;
+  try {
+    operatorId = getGraphOperatorUserId();
+  } catch (error) {
+    logger?.warn(
+      `Background Graph skipped: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return undefined;
+  }
+  if (!(await userHasGraphAuth(operatorId))) {
+    logger?.warn(
+      `Background Graph skipped: operator ${operatorId} has not completed Teams SSO yet`
+    );
+    return undefined;
+  }
+  try {
+    return await runWithGraphAuthUserAsync(operatorId, fn);
+  } catch (error) {
+    if (error instanceof GraphAuthRequiredError) {
+      logger?.warn(
+        `Background Graph skipped: operator SSO required (${error.message})`
+      );
+      return undefined;
+    }
+    throw error;
+  }
+}
 
 function resolvePollIntervalMs(): number {
   const raw = Number(process.env.EVENTS_DELTA_POLL_INTERVAL_MS || DEFAULT_POLL_INTERVAL_MS);
@@ -181,19 +224,21 @@ export async function runDeltaSyncTick(logger?: ILogger): Promise<void> {
   }
   pollInFlight = true;
   try {
-    const sources = await listActiveSharepointSources();
-    if (!sources.length) {
-      return;
-    }
-    logger?.debug(`⏱️ Delta poll: checking ${sources.length} SharePoint document(s)`);
-    for (const source of sources) {
-      try {
-        await syncOneSource(source, logger);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        logger?.warn(`Delta poll failed for ${source.documentId}: ${message}`);
+    await withOperatorGraphAuth(logger, async () => {
+      const sources = await listActiveSharepointSources();
+      if (!sources.length) {
+        return;
       }
-    }
+      logger?.debug(`⏱️ Delta poll: checking ${sources.length} SharePoint document(s)`);
+      for (const source of sources) {
+        try {
+          await syncOneSource(source, logger);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          logger?.warn(`Delta poll failed for ${source.documentId}: ${message}`);
+        }
+      }
+    });
   } finally {
     pollInFlight = false;
   }
@@ -395,24 +440,26 @@ export async function renewExpiringSubscriptions(logger?: ILogger): Promise<void
   if (!Number.isFinite(expiresAt) || expiresAt > Date.now() + RENEW_WITHIN_MS) {
     return;
   }
-  try {
-    const renewed = await renewGraphSubscription(stored.id);
-    if (!renewed?.id || !renewed.expirationDateTime) {
-      return;
+  await withOperatorGraphAuth(logger, async () => {
+    try {
+      const renewed = await renewGraphSubscription(stored.id);
+      if (!renewed?.id || !renewed.expirationDateTime) {
+        return;
+      }
+      writeStoredSubscription({
+        ...stored,
+        id: renewed.id,
+        expirationDateTime: renewed.expirationDateTime,
+      });
+      await persistSubscriptionOnSources(renewed.id, renewed.expirationDateTime);
+      logger?.debug(
+        "Renewed Graph subscription " + renewed.id + " -> " + renewed.expirationDateTime
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger?.warn("Failed to renew Graph subscription " + stored.id + ": " + message);
     }
-    writeStoredSubscription({
-      ...stored,
-      id: renewed.id,
-      expirationDateTime: renewed.expirationDateTime,
-    });
-    await persistSubscriptionOnSources(renewed.id, renewed.expirationDateTime);
-    logger?.debug(
-      "Renewed Graph subscription " + renewed.id + " -> " + renewed.expirationDateTime
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    logger?.warn("Failed to renew Graph subscription " + stored.id + ": " + message);
-  }
+  });
 }
 
 /**
@@ -434,13 +481,15 @@ export async function ensureGraphChangeSubscription(logger?: ILogger): Promise<v
     );
   }
 
-  try {
-    const driveId = await resolveConfiguredDriveId();
-    await createDeltaSubscription(driveId, folderId, logger);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    logger?.warn("ensureGraphChangeSubscription failed: " + message);
-  }
+  await withOperatorGraphAuth(logger, async () => {
+    try {
+      const driveId = await resolveConfiguredDriveId();
+      await createDeltaSubscription(driveId, folderId, logger);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger?.warn("ensureGraphChangeSubscription failed: " + message);
+    }
+  });
 }
 
 /**

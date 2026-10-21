@@ -6,7 +6,7 @@ import {
   workbookSearchCache,
 } from "../../utils/queryCache";
 import { isCheckedMark, withSheetStats } from "./sheetParse";
-import { expandPersonNamesAgainstWorkbook } from "./nameMatch";
+import { expandPersonNamesAgainstWorkbook, scoreEnglishNameSimilarity } from "./nameMatch";
 import type {
   EventRecord,
   SheetData,
@@ -328,6 +328,23 @@ function requestedDrinks(query: string): Array<"JUICE" | "BEER" | "COCKTAIL"> {
   return DRINK_ALIASES.filter((drink) => drink.pattern.test(query)).map((drink) => drink.token);
 }
 
+/** True when the user asks about beverage value ALL (not "list all who drink beer"). */
+function isBeverageAllQuery(query: string): boolean {
+  const q = normalizeText(query);
+  const drinkContext =
+    /\b(drink|drinks|beverage|beverages)\b/.test(q) ||
+    query.includes("အချိုရည်") ||
+    query.includes("သောက်");
+  if (!drinkContext) {
+    return false;
+  }
+  // Specific drinks win over ALL.
+  if (requestedDrinks(query).length > 0) {
+    return false;
+  }
+  return /\ball\b/.test(q);
+}
+
 function isExclusiveDrinkQuery(query: string): boolean {
   const q = normalizeText(query);
   return (
@@ -360,6 +377,13 @@ function personLabel(row: EventRecord): string {
 function drinkTokens(value: string): Set<"JUICE" | "BEER" | "COCKTAIL"> {
   const upper = value.toUpperCase().replace(/COCKTIAL/g, "COCKTAIL");
   const tokens = new Set<"JUICE" | "BEER" | "COCKTAIL">();
+  // Literal "ALL" means every drink type in workbook scans for juice/beer/cocktail.
+  if (/\bALL\b/.test(upper) || upper.trim() === "အားလုံး") {
+    tokens.add("JUICE");
+    tokens.add("BEER");
+    tokens.add("COCKTAIL");
+    return tokens;
+  }
   if (upper.includes("JUICE")) {
     tokens.add("JUICE");
   }
@@ -370,6 +394,11 @@ function drinkTokens(value: string): Set<"JUICE" | "BEER" | "COCKTAIL"> {
     tokens.add("COCKTAIL");
   }
   return tokens;
+}
+
+function isBeverageAllCell(value: string): boolean {
+  const upper = value.trim().toUpperCase().replace(/\s+/g, " ");
+  return upper === "ALL" || upper === "အားလုံး";
 }
 
 function rowMatchesDrinks(
@@ -389,25 +418,175 @@ function rowMatchesDrinks(
     return false;
   }
   if (exclusive && drinks.length === 1) {
+    // "only JUICE" should not include people whose cell is ALL.
+    if (isBeverageAllCell(cell)) {
+      return false;
+    }
     return tokens.size === 1 && tokens.has(drinks[0]);
   }
   return drinks.every((drink) => tokens.has(drink));
 }
 
+function rowMatchesBeverageAll(row: EventRecord): boolean {
+  if (!personLabel(row)) {
+    return false;
+  }
+  return isBeverageAllCell(beverageCell(row));
+}
+
 /**
  * Beverage questions must scan every participant row.
- * Hybrid RAG only returns a sample, which drops people who only chose JUICE/BEER.
+ * Hybrid RAG only returns a sample, which drops people who only chose JUICE/BEER/ALL.
  */
 function scanBeverageMatches(sheets: SheetData[], query: string): SheetData[] | null {
+  const wantsAll = isBeverageAllQuery(query);
   const drinks = requestedDrinks(query);
-  if (!drinks.length) {
+  if (!wantsAll && !drinks.length) {
     return null;
   }
   const exclusive = isExclusiveDrinkQuery(query);
   const matched: SheetData[] = [];
 
   for (const sheet of sheets) {
-    const rows = sheet.rows.filter((row) => rowMatchesDrinks(row, drinks, exclusive));
+    const rows = sheet.rows.filter((row) =>
+      wantsAll ? rowMatchesBeverageAll(row) : rowMatchesDrinks(row, drinks, exclusive)
+    );
+    if (!rows.length) {
+      continue;
+    }
+    matched.push(
+      withSheetStats(sheet, rows, { omitSummary: true, keepCheckmarkColumns: true })
+    );
+  }
+
+  return matched.length ? matched : null;
+}
+
+function rowNo(row: EventRecord): number {
+  const raw = String(row["No."] || row.No || "").trim();
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY;
+}
+
+function ferryBlob(row: EventRecord): string {
+  return [row.Ferry, row.Driver, row.ferry, row.driver]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+function normalizeFerryKey(value: string): string {
+  return value.toUpperCase().replace(/\s+/g, "");
+}
+
+/** Plate / ferry ids mentioned in the question (e.g. 4N-9173). */
+function extractFerryKeysFromQuery(query: string): string[] {
+  const keys = new Set<string>();
+  for (const match of query.match(/\b\d+[A-Za-z]-?\d+\b/g) || []) {
+    keys.add(normalizeFerryKey(match));
+  }
+  for (const match of query.match(/\bferry\s*#?\s*([A-Za-z0-9-]+)\b/gi) || []) {
+    const id = match.replace(/^ferry\s*#?\s*/i, "").trim();
+    if (id) {
+      keys.add(normalizeFerryKey(id));
+    }
+  }
+  return [...keys];
+}
+
+function isFerryRosterQuery(query: string): boolean {
+  const q = normalizeText(query);
+  return (
+    /\bferry\b/.test(q) ||
+    /\bshuttle\b/.test(q) ||
+    /\bdrop(?:ped)?\s*-?\s*off\b/.test(q) ||
+    /\bafter me\b/.test(q) ||
+    /\bsame ferry\b/.test(q) ||
+    /\bdriver\b/.test(q) ||
+    query.includes("ဖယ်ရီ") ||
+    extractFerryKeysFromQuery(query).length > 0
+  );
+}
+
+function rowMatchesFerryKey(row: EventRecord, key: string): boolean {
+  const blob = normalizeFerryKey(ferryBlob(row));
+  if (!blob || !key) {
+    return false;
+  }
+  return blob.includes(key) || key.includes(blob);
+}
+
+function findRequesterFerryKeys(
+  sheets: SheetData[],
+  requesterName?: string
+): string[] {
+  const name = (requesterName || "").trim();
+  if (!name) {
+    return [];
+  }
+  let best: { score: number; keys: string[] } | null = null;
+  for (const sheet of sheets) {
+    for (const row of sheet.rows) {
+      const label = personLabel(row);
+      if (!label || !ferryBlob(row)) {
+        continue;
+      }
+      const score = Math.max(
+        scoreEnglishNameSimilarity(name, label),
+        scoreEnglishNameSimilarity(label, name)
+      );
+      if (score < 0.72) {
+        continue;
+      }
+      const keys = extractFerryKeysFromQuery(ferryBlob(row));
+      if (!keys.length) {
+        // Fall back to whole ferry title as a key fragment.
+        const ferry = String(row.Ferry || "").trim();
+        if (ferry) {
+          keys.push(normalizeFerryKey(ferry));
+        }
+      }
+      if (!keys.length) {
+        continue;
+      }
+      if (!best || score > best.score) {
+        best = { score, keys };
+      }
+    }
+  }
+  return best?.keys || [];
+}
+
+/**
+ * Ferry / drop-off / "after me" questions need the full passenger list for that ferry.
+ * Hybrid RAG only returns a sample (e.g. No 5 without No 6+), which breaks order questions.
+ */
+function scanFerryMatches(
+  sheets: SheetData[],
+  query: string,
+  requesterName?: string
+): SheetData[] | null {
+  if (!isFerryRosterQuery(query)) {
+    return null;
+  }
+
+  let keys = extractFerryKeysFromQuery(query);
+  if (!keys.length && (isSelfReferenceQuery(query) || /\bafter me\b/i.test(query))) {
+    keys = findRequesterFerryKeys(sheets, requesterName);
+  }
+  if (!keys.length) {
+    // Still ferry-related but no plate — use requester ferry when a name is known.
+    keys = findRequesterFerryKeys(sheets, requesterName);
+  }
+  if (!keys.length) {
+    return null;
+  }
+
+  const matched: SheetData[] = [];
+  for (const sheet of sheets) {
+    const rows = sheet.rows
+      .filter((row) => personLabel(row) && keys.some((key) => rowMatchesFerryKey(row, key)))
+      .sort((a, b) => rowNo(a) - rowNo(b));
     if (!rows.length) {
       continue;
     }
@@ -540,8 +719,9 @@ async function searchWorkbookUncached(
   const beverageSheets = scanBeverageMatches(sheetsData, trimmedQuery);
   if (beverageSheets) {
     const matchCount = beverageSheets.reduce((sum, sheet) => sum + sheet.rows.length, 0);
-    const drinks = requestedDrinks(trimmedQuery).join(" + ");
     const exclusive = isExclusiveDrinkQuery(trimmedQuery);
+    const wantsAll = isBeverageAllQuery(trimmedQuery);
+    const drinks = wantsAll ? "ALL" : requestedDrinks(trimmedQuery).join(" + ");
     return {
       source,
       source_type: sourceType,
@@ -549,9 +729,11 @@ async function searchWorkbookUncached(
       total_rows: totalRows,
       match_count: matchCount,
       retrieval: "beverage",
-      answer_hint: exclusive
-        ? `Complete list: ${matchCount} people whose beverage is only ${drinks}. List every Name. Do not treat this as a sample.`
-        : `Complete list: ${matchCount} people whose beverage includes ${drinks}. List every Name. Do not treat this as a sample.`,
+      answer_hint: wantsAll
+        ? `Complete list: ${matchCount} people whose beverage is ALL. List every Name. Do not treat this as a sample.`
+        : exclusive
+          ? `Complete list: ${matchCount} people whose beverage is only ${drinks}. List every Name. Do not treat this as a sample.`
+          : `Complete list: ${matchCount} people whose beverage includes ${drinks}. List every Name. Do not treat this as a sample.`,
       sheets: beverageSheets,
     };
   }
@@ -569,6 +751,28 @@ async function searchWorkbookUncached(
       retrieval: "checkmark",
       answer_hint: `Complete list: ${matchCount} people checked 〇 in [${targets}]. List every Name from the returned rows. Do not treat this as a sample.`,
       sheets: checkmarkSheets,
+    };
+  }
+
+  const ferrySheets = scanFerryMatches(
+    sheetsData,
+    trimmedQuery,
+    options.requesterName
+  );
+  if (ferrySheets) {
+    const matchCount = ferrySheets.reduce((sum, sheet) => sum + sheet.rows.length, 0);
+    return {
+      source,
+      source_type: sourceType,
+      file_name: fileName,
+      total_rows: totalRows,
+      match_count: matchCount,
+      retrieval: "ferry",
+      answer_hint:
+        `Complete ferry roster: ${matchCount} passengers in No. order (Ferry/Driver fields included). ` +
+        `Use every returned row — do not treat this as a sample. ` +
+        `For "Nth after me", find the sender's No. then answer with the passenger at No. + N.`,
+      sheets: ferrySheets,
     };
   }
 
