@@ -143,12 +143,6 @@ setGraphWebhookChangeHandler((log) => {
 let storage: IDatabase;
 let feedbackStorage: IDatabase;
 
-function resolveActivityUserId(activity: {
-  from?: { aadObjectId?: string; id?: string };
-}): string {
-  return resolveTeamsAuthUserIds(activity.from).canonical;
-}
-
 async function promptGraphSso(
   send: (activity: ActivityLike) => Promise<unknown>,
   userId: string,
