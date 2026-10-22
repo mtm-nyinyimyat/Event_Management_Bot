@@ -1,20 +1,11 @@
 import crypto from "crypto";
 import { Attachment, MessageActivity } from "@microsoft/teams.api";
 import { ILogger } from "@microsoft/teams.common";
-import { findActiveEventSession } from "./eventSession";
-import {
-  getConversationWorkbook,
-  sheetsToXlsxBuffer,
-  type CachedWorkbook,
-} from "./excelStore";
+import { sheetsToXlsxBuffer, type CachedWorkbook } from "./excelStore";
 
-const FILE_CONSENT_CARD = "application/vnd.microsoft.teams.card.file.consent";
 const FILE_INFO_CARD = "application/vnd.microsoft.teams.card.file.info";
 
 export const SERVICE_UNAVAILABLE_TEXT =
-  "Sorry, I'm a bit stuck right now — tap Accept below if you want the Excel file.";
-
-const SERVICE_UNAVAILABLE_NO_FILE_TEXT =
   "Sorry, I'm a bit stuck right now. Try again in a moment?";
 
 interface ActiveEventExport {
@@ -65,64 +56,17 @@ export function getActiveEventExportForDownload(token: string): ActiveEventExpor
   return activeExport;
 }
 
-async function resolveWorkbookBytes(): Promise<ActiveEventExport | null> {
-  if (activeExport?.buffer?.length) {
-    return activeExport;
-  }
-
-  const session = await findActiveEventSession();
-  if (!session) {
-    return null;
-  }
-
-  const workbook = getConversationWorkbook(session.conversationId);
-  if (!workbook?.sheets?.length) {
-    return null;
-  }
-
-  try {
-    setActiveEventExport({ workbook, conversationId: session.conversationId });
-    return activeExport;
-  } catch {
-    return null;
-  }
-}
-
-function buildFileConsentAttachment(file: ActiveEventExport): Attachment {
-  return {
-    contentType: FILE_CONSENT_CARD,
-    name: file.fileName,
-    content: {
-      description: "Active event workbook (Excel)",
-      sizeInBytes: file.buffer.length,
-      acceptContext: { token: file.downloadToken, kind: "active-event-workbook" },
-      declineContext: { token: file.downloadToken, kind: "active-event-workbook" },
-    },
-  };
-}
-
 export interface ServiceUnavailableReply {
   message: MessageActivity;
   hasFileConsent: boolean;
   fileName?: string;
 }
 
-/** User-facing reply when an internal error occurred (no raw error text). */
+/** User-facing reply when an internal error occurred (no raw error text / no Excel Accept card). */
 export async function createServiceUnavailableReply(): Promise<ServiceUnavailableReply> {
-  const file = await resolveWorkbookBytes();
-  if (!file) {
-    return {
-      message: new MessageActivity(SERVICE_UNAVAILABLE_NO_FILE_TEXT),
-      hasFileConsent: false,
-    };
-  }
-
   return {
-    message: new MessageActivity(SERVICE_UNAVAILABLE_TEXT).addAttachments(
-      buildFileConsentAttachment(file)
-    ),
-    hasFileConsent: true,
-    fileName: file.fileName,
+    message: new MessageActivity(SERVICE_UNAVAILABLE_TEXT),
+    hasFileConsent: false,
   };
 }
 

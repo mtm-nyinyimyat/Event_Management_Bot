@@ -3,7 +3,7 @@ import path from "path";
 import type { CachedWorkbook } from "./types";
 
 const UPLOAD_PERSIST_PATH = path.join(process.cwd(), "data", ".last-chat-upload.json");
-const PARSE_VERSION = 6;
+const PARSE_VERSION = 10;
 
 let workbookCache: CachedWorkbook | null = null;
 let sharedUploadedWorkbook: CachedWorkbook | null = null;

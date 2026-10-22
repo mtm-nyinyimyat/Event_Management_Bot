@@ -27,16 +27,103 @@ function isHeaderLabel(cell: string): boolean {
     return false;
   }
   // Times, durations, and plain numbers are data, not column titles.
+  // Allow "Estimate time" / "Start Time" style headers (words + time) before the ":" check.
+  const normalized = value.replace(/:$/, "").trim();
+  if (
+    /^(date|day|place|venue|location|estimate\s*time|estimated?\s*time|duration|start\s*time|end\s*time|time|period|ကြာချိန်|ရက်စွဲ|နေရာ)$/i.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
   if (/^\d/.test(value) || /mins?\b/i.test(value) || value.includes("~") || value.includes(":")) {
     return false;
   }
   return (
-    /^(no\.?|name|member name|members|team leader name|date|start time|end time|detail|description|location|remark|period|time|table|beverage|role|gps point|dev|event participate|mtm to event|event to home|incharge contact number)$/i.test(
+    /^(no\.?|name|member name|members|team leader name|detail|description|remark|table|beverage|drink|role|gps point|dev|event participate|mtm to event|event to home|incharge contact number|status|email|phone|department|team|group|song|food|wine|tea|water|seat|section)$/i.test(
       value
     ) ||
     value === "ကြာချိန်" ||
     /volunteer|reference|participate/i.test(value)
   );
+}
+
+const EVENT_META_LABEL =
+  /^(date|day|place|venue|location|estimate\s*time|estimated?\s*time|duration|ကြာချိန်|ရက်စွဲ|နေရာ)$/i;
+
+function metaFieldKey(label: string): string {
+  const normalized = label.replace(/:$/, "").trim().toLocaleLowerCase("en");
+  if (/^(date|day)\b/.test(normalized) || normalized.includes("ရက်")) {
+    return "Date";
+  }
+  if (/place|venue|location/.test(normalized) || normalized.includes("နေရာ")) {
+    return "Place";
+  }
+  if (/estimate|duration/.test(normalized) || normalized.includes("ကြာချိန်")) {
+    return "Estimate time";
+  }
+  if (/^estimate\s*time$|^estimated?\s*time$/.test(normalized)) {
+    return "Estimate time";
+  }
+  return label.replace(/:$/, "").trim();
+}
+
+/**
+ * Sheet-level event facts often sit beside/above the Participants table as
+ * label|value pairs (Date / Place / Estimate time), not as per-person columns.
+ */
+function extractEventMetaRecords(values: unknown[][]): EventRecord[] {
+  const records: EventRecord[] = [];
+  const seen = new Set<string>();
+
+  const pushMeta = (label: string, value: string) => {
+    const field = metaFieldKey(label);
+    const text = value.trim();
+    if (!text || EVENT_META_LABEL.test(text.replace(/:$/, ""))) {
+      return;
+    }
+    const key = `${field}::${text}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    records.push({
+      Section: "Event",
+      Field: field,
+      [field]: text,
+      Value: text,
+    });
+  };
+
+  for (let r = 0; r < Math.min(values.length, 40); r += 1) {
+    const row = values[r] || [];
+    for (let c = 0; c < row.length; c += 1) {
+      const raw = cellToString(row[c]);
+      if (!raw) {
+        continue;
+      }
+      const inline = raw.match(/^([^:]{2,40}):\s*(.+)$/);
+      if (inline && EVENT_META_LABEL.test(inline[1].trim())) {
+        pushMeta(inline[1], inline[2]);
+        continue;
+      }
+      const label = raw.replace(/:$/, "").trim();
+      if (!EVENT_META_LABEL.test(label)) {
+        continue;
+      }
+      const right = cellToString(row[c + 1]);
+      if (right) {
+        pushMeta(label, right);
+        continue;
+      }
+      // Value sometimes sits one row below the label.
+      const below = cellToString((values[r + 1] || [])[c]);
+      if (below && !EVENT_META_LABEL.test(below.replace(/:$/, ""))) {
+        pushMeta(label, below);
+      }
+    }
+  }
+  return records;
 }
 
 function looksLikeHeaderRow(row: unknown[]): boolean {
@@ -364,13 +451,22 @@ function matrixToStackedTableRecords(values: unknown[][]): EventRecord[] | null 
     const headerIndex = headerIndexes[h];
     const titleRow = headerIndex > 0 ? values[headerIndex - 1] || [] : [];
     const titleCells = nonEmptyCells(titleRow);
-    const ferry =
-      titleCells.find((cell) => /ferry|list|အပြန်|ဖယ်ရီ/i.test(cell.text))?.text ||
-      titleCells[0]?.text ||
-      "";
-    const driver =
-      titleCells.find((cell) => /driver/i.test(cell.text))?.text ||
-      (titleCells.length > 1 ? titleCells[1].text : "");
+    const titleBlob = titleCells.map((cell) => cell.text).join(" ");
+    const looksLikeFerryTitle =
+      (/ferry|driver|route|အပြန်|ဖယ်ရီ|ကား/i.test(titleBlob) ||
+        (/list/i.test(titleBlob) && !/volunteer|ကူညီ|ဝန်ထမ်း|notice|ကြေညာ/i.test(titleBlob))) &&
+      !/volunteer|ကူညီ|ဝန်ထမ်း|notice|ကြေညာ/i.test(titleBlob);
+    const ferry = looksLikeFerryTitle
+      ? titleCells.find((cell) => /ferry|list|အပြန်|ဖယ်ရီ/i.test(cell.text))?.text ||
+        titleCells[0]?.text ||
+        ""
+      : "";
+    const driver = looksLikeFerryTitle
+      ? titleCells.find((cell) => /driver/i.test(cell.text))?.text ||
+        (titleCells.length > 1 ? titleCells[1].text : "")
+      : "";
+    const notice =
+      !looksLikeFerryTitle && titleCells[0]?.text ? titleCells[0].text : "";
 
     const width = primaryTableWidth(values[headerIndex] || []);
     const headers = uniqueHeaders(
@@ -399,6 +495,9 @@ function matrixToStackedTableRecords(values: unknown[][]): EventRecord[] | null 
       }
       if (driver) {
         record.Driver = driver;
+      }
+      if (notice) {
+        record.Notice = notice;
       }
       headers.forEach((header, column) => {
         if (!header || header.startsWith("__EMPTY") || header.startsWith("Column_")) {
@@ -498,7 +597,7 @@ function looksLikeSeatPersonName(text: string): boolean {
   if (!value || value.length > 60) {
     return false;
   }
-  if (/^(table-\d+|vip)$/i.test(value)) {
+  if (isSeatTableLabel(value)) {
     return false;
   }
   if (isDrinkOrMenuLabel(value)) {
@@ -507,14 +606,27 @@ function looksLikeSeatPersonName(text: string): boolean {
   if (/^\d+(\.\d+)?$/.test(value)) {
     return false;
   }
-  // Person names in this workbook are mostly Latin; allow short Burmese too.
+  // Latin, Myanmar, or Japanese person names (reject pure punctuation).
+  if (!/[A-Za-z\u1000-\u109F\u3040-\u30FF\u4E00-\u9FFF]/.test(value)) {
+    return false;
+  }
   const tokens = value.split(/\s+/);
-  return tokens.length >= 1 && tokens.length <= 6 && /[A-Za-z\u1000-\u109F]/.test(value);
+  return tokens.length >= 1 && tokens.length <= 6;
+}
+
+/** Table-1, Table 1, Seat-3, 卓1, VIP — not locked to one event's naming. */
+function isSeatTableLabel(text: string): boolean {
+  const value = text.trim();
+  if (/^vip$/i.test(value)) {
+    return true;
+  }
+  return /^(table|seat|卓)\s*[-_]?\s*\d+$/i.test(value) || /^table-\d+$/i.test(value);
 }
 
 /**
- * Visual seating charts: "Table-N" / "VIP" labels with nearby name cells.
- * Emits one { Table, Name } record per seated person (plus optional menu rows).
+ * Visual seating charts: each Table-N/VIP owns names from the row below it
+ * down to (not including) the next label in the same column — never a fixed
+ * ±N window (that pulls people from the table above into the table below).
  */
 function matrixToSeatingChartRecords(values: unknown[][]): EventRecord[] | null {
   const labels: Array<{ row: number; col: number; table: string }> = [];
@@ -524,8 +636,8 @@ function matrixToSeatingChartRecords(values: unknown[][]): EventRecord[] | null 
     const row = values[r] || [];
     for (let c = 0; c < row.length; c += 1) {
       const text = cellToString(row[c]);
-      if (/^(table-\d+|vip)$/i.test(text)) {
-        labels.push({ row: r, col: c, table: text });
+      if (isSeatTableLabel(text)) {
+        labels.push({ row: r, col: c, table: text.trim() });
       }
     }
   }
@@ -536,20 +648,43 @@ function matrixToSeatingChartRecords(values: unknown[][]): EventRecord[] | null 
 
   const records: EventRecord[] = [];
   const seen = new Set<string>();
+  const personClaimed = new Set<string>();
 
   for (const label of labels) {
     const sameRowRight = labels
       .filter((other) => other.row === label.row && other.col > label.col)
       .sort((a, b) => a.col - b.col)[0];
-    const colEnd = sameRowRight ? sameRowRight.col - 1 : Math.min(label.col + 5, width - 1);
-    const rowStart = Math.max(0, label.row - 3);
-    const rowEnd = Math.min(values.length - 1, label.row + 4);
+    const colEnd = sameRowRight
+      ? sameRowRight.col - 1
+      : Math.min(label.col + 5, width - 1);
+
+    const belowCandidates = labels.filter(
+      (other) =>
+        other.row > label.row && other.col <= colEnd && other.col + 5 >= label.col
+    );
+    const sameColBelow = belowCandidates
+      .filter((other) => other.col === label.col)
+      .sort((a, b) => a.row - b.row)[0];
+    const nextBelow =
+      sameColBelow ||
+      belowCandidates.sort((a, b) => a.row - b.row || a.col - b.col)[0];
+
+    // Include the label row (names often sit beside Table-N) and rows below until the next label.
+    const rowStart = label.row;
+    const rowEnd = nextBelow ? nextBelow.row - 1 : values.length - 1;
+    if (rowStart > rowEnd) {
+      continue;
+    }
 
     for (let r = rowStart; r <= rowEnd; r += 1) {
       const row = values[r] || [];
       for (let c = label.col; c <= colEnd; c += 1) {
         const text = cellToString(row[c]);
-        if (!looksLikeSeatPersonName(text)) {
+        if (isSeatTableLabel(text) || !looksLikeSeatPersonName(text)) {
+          continue;
+        }
+        const personKey = text.toLocaleLowerCase("en");
+        if (personClaimed.has(personKey)) {
           continue;
         }
         const key = `${label.table}::${text}`;
@@ -557,12 +692,12 @@ function matrixToSeatingChartRecords(values: unknown[][]): EventRecord[] | null 
           continue;
         }
         seen.add(key);
+        personClaimed.add(personKey);
         records.push({ Table: label.table, Name: text });
       }
     }
   }
 
-  // Optional dinner-menu column (far-right labels like "Dinner Menu:")
   let menuCol = -1;
   for (let r = 0; r < Math.min(values.length, 5); r += 1) {
     const row = values[r] || [];
@@ -590,33 +725,153 @@ function matrixToSeatingChartRecords(values: unknown[][]): EventRecord[] | null 
   return records.length >= 8 ? records : null;
 }
 
+const MENU_CATEGORY =
+  /^(appetizer|salad|soup|main\s*course|dessert|starter|entree|entrée|side|drink|beverage)s?$/i;
+
+/** Category in col A (often once per group) + dishes in col B+. */
+function matrixToCourseMenuRecords(values: unknown[][]): EventRecord[] | null {
+  if (values.length < 2) {
+    return null;
+  }
+
+  let titleIndex = -1;
+  for (let r = 0; r < Math.min(values.length, 5); r += 1) {
+    const cells = (values[r] || []).map(cellToString).filter(Boolean);
+    if (
+      (cells.length === 1 && /^(dinner\s*)?menu$/i.test(cells[0])) ||
+      cells.some((cell) => /^dinner\s*menu$/i.test(cell))
+    ) {
+      titleIndex = r;
+      break;
+    }
+  }
+
+  let categoryHits = 0;
+  let dishHits = 0;
+  for (let r = Math.max(0, titleIndex + 1); r < values.length; r += 1) {
+    const row = values[r] || [];
+    const left = cellToString(row[0]);
+    const right = cellToString(row[1]) || cellToString(row[2]);
+    if (MENU_CATEGORY.test(left)) {
+      categoryHits += 1;
+    }
+    if (right && !MENU_CATEGORY.test(right) && !/^(dinner\s*)?menu$/i.test(right)) {
+      dishHits += 1;
+    }
+  }
+  if (titleIndex < 0 && categoryHits < 2) {
+    return null;
+  }
+  if (dishHits < 2) {
+    return null;
+  }
+
+  const records: EventRecord[] = [];
+  let category = "Menu";
+  for (let r = titleIndex >= 0 ? titleIndex + 1 : 0; r < values.length; r += 1) {
+    const row = values[r] || [];
+    const left = cellToString(row[0]);
+    const dishes: string[] = [];
+    for (let c = 1; c < row.length; c += 1) {
+      const text = cellToString(row[c]);
+      if (text) {
+        dishes.push(text);
+      }
+    }
+    if (!dishes.length && left && !MENU_CATEGORY.test(left)) {
+      dishes.push(left);
+    } else if (left && MENU_CATEGORY.test(left)) {
+      category = left.replace(/\s+/g, " ").trim();
+    } else if (left && !dishes.length) {
+      continue;
+    }
+    for (const dish of dishes) {
+      if (!dish || MENU_CATEGORY.test(dish) || /^(dinner\s*)?menu$/i.test(dish)) {
+        continue;
+      }
+      records.push({ Section: "Menu", Category: category, Dish: dish });
+    }
+  }
+  return records.length >= 2 ? records : null;
+}
+
+function looksLikeUnlabeledSeatingGrid(values: unknown[][]): boolean {
+  let personCells = 0;
+  let otherCells = 0;
+  let tableLabels = 0;
+  for (let r = 0; r < Math.min(values.length, 40); r += 1) {
+    for (const cell of values[r] || []) {
+      const text = cellToString(cell);
+      if (!text) {
+        continue;
+      }
+      if (isSeatTableLabel(text)) {
+        tableLabels += 1;
+        continue;
+      }
+      if (looksLikeSeatPersonName(text)) {
+        personCells += 1;
+      } else {
+        otherCells += 1;
+      }
+    }
+  }
+  return tableLabels === 0 && personCells >= 12 && personCells > otherCells * 2;
+}
+
 /** Generic matrix → records for any workbook layout. */
 export function matrixToRecords(values: unknown[][]): EventRecord[] {
   if (!values?.length) {
     return [];
   }
 
+  const eventMeta = extractEventMetaRecords(values);
+
   const seating = matrixToSeatingChartRecords(values);
   if (seating) {
-    return seating;
+    return eventMeta.length ? [...eventMeta, ...seating] : seating;
   }
 
+  const courseMenu = matrixToCourseMenuRecords(values);
+  if (courseMenu) {
+    return eventMeta.length ? [...eventMeta, ...courseMenu] : courseMenu;
+  }
+
+  // Try structured parsers before dropping name-heavy sheets (ferry routes, rosters).
+  // Unlabeled seating grids are only suppressed when nothing structured matched.
   const sectioned = matrixToSectionedRecords(values);
   if (sectioned) {
-    return sectioned;
+    return eventMeta.length ? [...eventMeta, ...sectioned] : sectioned;
   }
 
   const stacked = matrixToStackedTableRecords(values);
   if (stacked) {
-    return stacked;
+    return eventMeta.length ? [...eventMeta, ...stacked] : stacked;
   }
 
   const columnLists = matrixToColumnListRecords(values);
   if (columnLists) {
-    return columnLists;
+    return eventMeta.length ? [...eventMeta, ...columnLists] : columnLists;
   }
 
-  return matrixToFlatRecords(values);
+  const flat = matrixToFlatRecords(values);
+  if (looksLikeUnlabeledSeatingGrid(values)) {
+    // Keep structured people tables (No./Name); only drop pure visual name grids.
+    const hasPeopleTable = flat.some(
+      (row) =>
+        Boolean(row.Name || row.NAME || row["Member name"] || row.Members) &&
+        Boolean(row["No."] || row.No || row.Beverage || row.Description)
+    );
+    if (!hasPeopleTable) {
+      return eventMeta;
+    }
+  }
+
+  if (!eventMeta.length) {
+    return flat;
+  }
+  // Prefer structured Event meta over raw Notice joins for the same facts.
+  return [...eventMeta, ...flat];
 }
 
 const CHECKMARK_TOKENS = /[〇○●◯◎✓✔]/u;

@@ -4,7 +4,10 @@ import {
   type AuthenticationResult,
   type Configuration,
 } from "@azure/msal-node";
-import { getGraphAuthUserId } from "./graphAuthContext";
+import {
+  getGraphAuthAlternateUserIds,
+  getGraphAuthUserId,
+} from "./graphAuthContext";
 import {
   clearStoredGraphTokens,
   getStoredGraphTokens,
@@ -345,7 +348,8 @@ async function acquireAppToken(): Promise<string> {
   return token.token;
 }
 
-async function acquireSsoTokenForUser(userId: string): Promise<string> {
+/** Load a usable access token for one exact store key (refreshing when needed). */
+async function tryAcquireSsoTokenForExactId(userId: string): Promise<string | null> {
   const cached = await getStoredGraphTokens(userId);
   if (cached && cached.expiresAt > Date.now() && cached.accessToken) {
     return cached.accessToken;
@@ -363,6 +367,45 @@ async function acquireSsoTokenForUser(userId: string): Promise<string> {
     // so SSO checks don't treat the user as already signed in.
     await clearStoredGraphTokens(userId);
   }
+  return null;
+}
+
+/**
+ * Acquire a Graph token for this user, also checking alternate Teams ids.
+ * When found under an alternate key, copies the row onto the canonical id so
+ * later DM/group/channel lookups share one sign-in.
+ */
+async function acquireSsoTokenForUser(
+  userId: string,
+  alternateUserIds: string[] = []
+): Promise<string> {
+  const candidates = [
+    ...new Set(
+      [userId, ...alternateUserIds]
+        .map((id) => id.trim())
+        .filter(Boolean)
+    ),
+  ];
+
+  for (const id of candidates) {
+    const token = await tryAcquireSsoTokenForExactId(id);
+    if (!token) {
+      continue;
+    }
+    if (id !== userId) {
+      const row = await getStoredGraphTokens(id);
+      if (row) {
+        await saveUserGraphTokens(userId, {
+          accessToken: row.accessToken,
+          refreshToken: row.refreshToken ?? undefined,
+          expiresAt: row.expiresAt,
+          scope: row.scope,
+        });
+      }
+    }
+    return token;
+  }
+
   throw new GraphAuthRequiredError(
     userId,
     `No valid Graph token for user ${userId}. Complete Teams SSO first.`
@@ -391,11 +434,16 @@ export async function getGraphAccessToken(userId?: string): Promise<string> {
     );
   }
 
+  const alternates =
+    userId?.trim() && userId.trim() !== getGraphAuthUserId()?.trim()
+      ? []
+      : getGraphAuthAlternateUserIds();
+
   const existing = inflightByUser.get(resolved);
   if (existing) {
     return existing;
   }
-  const pending = acquireSsoTokenForUser(resolved).finally(() => {
+  const pending = acquireSsoTokenForUser(resolved, alternates).finally(() => {
     inflightByUser.delete(resolved);
   });
   inflightByUser.set(resolved, pending);
@@ -411,12 +459,16 @@ export async function getOperatorGraphAccessToken(): Promise<string> {
  * (unexpired access, or a refresh token that still works).
  * Stale rows with expired access and no refresh are cleared.
  */
-export async function userHasGraphAuth(userId: string): Promise<boolean> {
+export async function userHasGraphAuth(
+  userId: string,
+  alternateUserIds: string[] = []
+): Promise<boolean> {
   if (getGraphAuthMode() !== "sso") {
     return true;
   }
   try {
-    await getGraphAccessToken(userId);
+    // Bypass ALS so callers can pass explicit alternates (DM vs group id keys).
+    await acquireSsoTokenForUser(userId.trim(), alternateUserIds);
     return true;
   } catch (error) {
     if (error instanceof GraphAuthRequiredError) {

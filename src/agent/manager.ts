@@ -55,9 +55,16 @@ export class ManagerPrompt {
 
   async processRequest(): Promise<ManagerResult> {
     const normalizedQuestion = normalizeCacheQuery(this.context.text);
-    const answerKey = `answer::${normalizedQuestion}`;
+    // Scope by conversation so short follow-ups ("list") never reuse another chat's answer.
+    const answerKey = `answer::${this.context.conversationId}::${normalizedQuestion}`;
+    const looksLikeFollowUp =
+      normalizedQuestion.length > 0 &&
+      normalizedQuestion.length <= 40 &&
+      /\b(list|send|show|yes|ok|please|names?|စာရင်း|နာမည်|ပို့|ပေး)\b/i.test(
+        this.context.text || ""
+      );
 
-    if (normalizedQuestion) {
+    if (normalizedQuestion && !looksLikeFollowUp) {
       const cachedAnswer = answerCache.get(answerKey);
       if (cachedAnswer) {
         this.logger.debug(`🗃️ Answer cache hit for "${normalizedQuestion}"`);
@@ -118,6 +125,7 @@ export class ManagerPrompt {
 
       if (
         normalizedQuestion &&
+        !looksLikeFollowUp &&
         text &&
         !/^sorry,/i.test(text) &&
         !/rate limit|error processing|provider is busy|error looking up events/i.test(text)

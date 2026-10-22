@@ -20,7 +20,21 @@ export interface WorkbookSearchResult {
   total_rows: number;
   match_count: number;
   answer_hint?: string;
-  retrieval?: "hybrid" | "lexical" | "overview" | "beverage" | "checkmark" | "ferry";
+  retrieval?:
+    | "hybrid"
+    | "lexical"
+    | "overview"
+    | "beverage"
+    | "checkmark"
+    | "ferry"
+    | "duty"
+    | "seating"
+    | "menu"
+    | "group"
+    | "person"
+    | "agenda"
+    | "event_date"
+    | "event_meta";
   rag?: {
     enabled: boolean;
     provider: string;

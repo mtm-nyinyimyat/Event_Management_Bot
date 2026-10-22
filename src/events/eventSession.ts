@@ -12,6 +12,7 @@ import {
   type DocumentSourceType,
 } from "../rag";
 import { getPostgresPool } from "../storage/postgres";
+import { clearEventLookupMemory } from "./excel/eventLookupMemory";
 import { clearQueryCaches } from "../utils/queryCache";
 import {
   clearConversationWorkbook,
@@ -714,6 +715,8 @@ export async function endEventSession(options: {
   clearConversationWorkbook(targetId);
   clearWorkbookCache();
   clearQueryCaches();
+  clearEventLookupMemory(conversationId);
+  clearEventLookupMemory(targetId);
 
   const documentIds = new Set<string>();
   if (session.documentId) {

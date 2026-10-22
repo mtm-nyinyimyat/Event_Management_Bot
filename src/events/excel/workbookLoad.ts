@@ -140,7 +140,9 @@ export async function loadWorkbook(
   const uploaded = resolveUploadedWorkbook(conversationId, options.userId);
   if (!uploaded && isEventSessionMode() && conversationId) {
     try {
-      const { ensureActiveWorkbookInMemory, getEventSession } = await import("../eventSession.js");
+      const { ensureActiveWorkbookInMemory, getEventSession } = await import(
+        "../eventSessionLazy"
+      ).then((mod) => mod.importEventSession());
       await ensureActiveWorkbookInMemory(conversationId);
       if (!options.documentId) {
         const session = await getEventSession(conversationId);
@@ -166,7 +168,9 @@ export async function loadWorkbook(
     // otherwise edits in Excel (e.g. flipping Event To Home ×) never appear.
     if (!isChatUpload && stale) {
       try {
-        const { ensureActiveWorkbookInMemory } = await import("../eventSession.js");
+        const { ensureActiveWorkbookInMemory } = await import(
+          "../eventSessionLazy"
+        ).then((mod) => mod.importEventSession());
         const refreshed = await ensureActiveWorkbookInMemory(
           conversationId || "",
           undefined,

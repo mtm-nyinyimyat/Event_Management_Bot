@@ -46,10 +46,17 @@ import {
   getGraphAuthMode,
   getGraphOperatorUserId,
   GraphAuthRequiredError,
+  saveUserGraphTokens,
   userHasGraphAuth,
 } from "./events/graphAuth";
-import { runWithGraphAuthUserAsync } from "./events/graphAuthContext";
-import { ensureGraphTokenSchema } from "./events/graphTokenStore";
+import {
+  resolveTeamsAuthUserIds,
+  runWithGraphAuthUserAsync,
+} from "./events/graphAuthContext";
+import {
+  ensureGraphTokenSchema,
+  getStoredGraphTokens,
+} from "./events/graphTokenStore";
 import { registerEntraAuthRoutes } from "./events/entraAuthRoutes";
 import {
   buildGraphSsoOAuthCard,
@@ -72,13 +79,13 @@ import {
 
 const logger = new ConsoleLogger("collaborator", { level: "debug" });
 
-/** @mention sender + reply in the channel thread of the triggering post. */
+/** @mention sender in groups/channels only; reply in the thread of the triggering post. */
 function replyOptionsFromContext(
   context: MessageContext,
   extras?: Pick<BotReplyOptions, "withFeedback">
 ): BotReplyOptions {
   return {
-    mentionAccount: context.senderAccount,
+    mentionAccount: context.isPersonalChat ? undefined : context.senderAccount,
     replyToId: context.replyToId,
     withFeedback: extras?.withFeedback,
   };
@@ -139,14 +146,36 @@ let feedbackStorage: IDatabase;
 function resolveActivityUserId(activity: {
   from?: { aadObjectId?: string; id?: string };
 }): string {
-  return activity.from?.aadObjectId || activity.from?.id || "";
+  return resolveTeamsAuthUserIds(activity.from).canonical;
 }
 
 async function promptGraphSso(
   send: (activity: ActivityLike) => Promise<unknown>,
   userId: string,
-  log: ILogger
+  log: ILogger,
+  options?: { isPersonalChat?: boolean }
 ): Promise<void> {
+  // Teams silent SSO / OAuth cards are unreliable outside personal scope.
+  // Prefer a browser sign-in link in group/channel so one personal consent is enough.
+  if (options?.isPersonalChat === false) {
+    try {
+      const startUrl = getAuthStartUrl(userId);
+      await send(
+        "Please sign in once so I can access Microsoft 365 on your behalf. " +
+          "After that, the same sign-in works in this group/channel and in 1:1 chat.\n\n" +
+          `Sign in: ${startUrl}`
+      );
+      log.debug("Sent Graph sign-in link for group/channel (no OAuth card)");
+      return;
+    } catch (error) {
+      log.warn(
+        `Group sign-in link failed, falling back to OAuth card: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
   try {
     await send(buildGraphSsoOAuthCard({ userId }));
     log.debug("Sent Teams SSO card (tokenExchange + /auth/start fallback)");
@@ -175,7 +204,8 @@ async function promptGraphSso(
 async function ensureMessageGraphAuth(
   send: (activity: ActivityLike) => Promise<unknown>,
   userId: string,
-  log: ILogger
+  log: ILogger,
+  options?: { alternateUserIds?: string[]; isPersonalChat?: boolean }
 ): Promise<boolean> {
   if (getGraphAuthMode() !== "sso") {
     return true;
@@ -185,16 +215,20 @@ async function ensureMessageGraphAuth(
     return true;
   }
   // Validates / refreshes the stored token — not merely that a DB row exists.
-  if (await userHasGraphAuth(userId)) {
+  // Also checks alternate Teams ids so DM sign-in is reused in group/channel.
+  if (await userHasGraphAuth(userId, options?.alternateUserIds || [])) {
     return true;
   }
-  log.debug(`No usable Graph SSO token for ${userId}; sending sign-in card`);
-  await promptGraphSso(send, userId, log);
+  log.debug(`No usable Graph SSO token for ${userId}; sending sign-in prompt`);
+  await promptGraphSso(send, userId, log, {
+    isPersonalChat: options?.isPersonalChat,
+  });
   return false;
 }
 
 app.on("signin.token-exchange", async ({ activity, log }) => {
-  const userId = resolveActivityUserId(activity);
+  const authIds = resolveTeamsAuthUserIds(activity.from);
+  const userId = authIds.canonical;
   const assertion = extractTokenExchangeAssertion(activity);
   const connectionName =
     (activity.value as { connectionName?: string } | undefined)?.connectionName ||
@@ -216,6 +250,18 @@ app.on("signin.token-exchange", async ({ activity, log }) => {
 
   try {
     await completeSsoTokenExchange(userId, assertion);
+    // Mirror under Teams id when both are present so DM / group / channel share one sign-in.
+    const stored = await getStoredGraphTokens(userId);
+    if (stored) {
+      for (const alt of authIds.alternates) {
+        await saveUserGraphTokens(alt, {
+          accessToken: stored.accessToken,
+          refreshToken: stored.refreshToken ?? undefined,
+          expiresAt: stored.expiresAt,
+          scope: stored.scope,
+        });
+      }
+    }
     log.debug(`Graph SSO OBO complete for user ${userId}`);
     return { status: 200 };
   } catch (error) {
@@ -353,17 +399,17 @@ async function sendServiceUnavailable(
     if (context?.replyToId) {
       reply.message.replyToId = context.replyToId;
     }
-    if (context?.senderAccount?.id && context.senderAccount.name) {
+    if (
+      context &&
+      !context.isPersonalChat &&
+      context.senderAccount?.id &&
+      context.senderAccount.name
+    ) {
       reply.message.addMention(context.senderAccount, { addText: false });
       const body = String(reply.message.text || "").trim();
       reply.message.text = `<at>${context.senderAccount.name}</at> ${body}`;
     }
     await send(reply.message);
-    if (reply.hasFileConsent) {
-      log.debug(`📎 Sent file consent card for ${reply.fileName}`);
-    } else {
-      log.warn("Service unavailable reply sent without Excel consent card (no active workbook in memory)");
-    }
   } catch (sendError) {
     log.error(`Failed to send service-unavailable reply: ${describeNetworkError(sendError)}`);
   }
@@ -403,9 +449,12 @@ app.on("message", async ({ send, activity, api }) => {
     ? await createMessageContext(storage, activity, api)
     : await createMessageContext(storage, activity);
 
-  const graphUserId = context.userId || resolveActivityUserId(activity);
+  const authIds = resolveTeamsAuthUserIds(activity.from);
+  const graphUserId = authIds.canonical || context.userId || "";
 
-  await runWithGraphAuthUserAsync(graphUserId || "anonymous", async () => {
+  await runWithGraphAuthUserAsync(
+    graphUserId || "anonymous",
+    async () => {
   let trackedMessages;
 
   if (shouldHandle) {
@@ -416,15 +465,8 @@ app.on("message", async ({ send, activity, api }) => {
     }
 
     try {
-      // SharePoint ingest needs Graph SSO before URL staging / start.
-      if (getGraphAuthMode() === "sso" && getEventIngestMode() === "sharepoint") {
-        const ok = await ensureMessageGraphAuth(send, graphUserId, logger);
-        if (!ok) {
-          return;
-        }
-      }
-
       // Channel posts: BF payload often lacks preview/file links — re-read via Graph.
+      // Best-effort only — do not require every group member to be signed in for Q&A.
       const graphMessage = await fetchGraphMessageSafe(activity);
       const activityText = graphMessage?.body?.content || activity.text;
       const text = stripMentions(activityText);
@@ -505,6 +547,18 @@ app.on("message", async ({ send, activity, api }) => {
           trackedMessages = createMessageRecords([activity]);
           logger.debug(`Blocked /start while event active; replied id=${sent.id}`);
         } else {
+          // SharePoint /start downloads via Graph — only the starter must be signed in.
+          // Other group members can @mention and ask about the loaded event without SSO.
+          if (getGraphAuthMode() === "sso" && getEventIngestMode() === "sharepoint") {
+            const ok = await ensureMessageGraphAuth(send, graphUserId, logger, {
+              alternateUserIds: authIds.alternates,
+              isPersonalChat: context.isPersonalChat,
+            });
+            if (!ok) {
+              trackedMessages = createMessageRecords([activity]);
+              return;
+            }
+          }
           // Ensure links from this same post are saved before start reads pendingUrls.
           if (shareUrlsThisMessage.length > 0) {
             await addPendingShareUrls(conversationId, shareUrlsThisMessage);
@@ -649,7 +703,30 @@ app.on("message", async ({ send, activity, api }) => {
       }
     } catch (error) {
       if (error instanceof GraphAuthRequiredError) {
-        await promptGraphSso(send, error.userId || graphUserId, logger);
+        const authUser = graphUserId || error.userId;
+        // Token may already exist under the other Teams id (DM vs group).
+        if (authUser && (await userHasGraphAuth(authUser, authIds.alternates))) {
+          await send(
+            finalizePromptResponse(
+              "You're already signed in. Please send your question again.",
+              replyOptionsFromContext(context, { withFeedback: false })
+            )
+          );
+        } else if (!context.isPersonalChat && (await isAnyEventActive())) {
+          // Group Q&A should not require every member to SSO — only /start does.
+          await send(
+            finalizePromptResponse(
+              "I couldn't refresh the Excel from SharePoint with your account. " +
+                "Ask the person who started the event (or anyone already signed in) to send /start again, " +
+                "or @mention me with your question once the file is loaded.",
+              replyOptionsFromContext(context, { withFeedback: false })
+            )
+          );
+        } else {
+          await promptGraphSso(send, authUser, logger, {
+            isPersonalChat: context.isPersonalChat,
+          });
+        }
         trackedMessages = createMessageRecords([activity]);
       } else {
       const detail = describeNetworkError(error);
@@ -671,7 +748,9 @@ app.on("message", async ({ send, activity, api }) => {
 
   logger.debug(trackedMessages);
   await context.memory.addMessages(trackedMessages);
-  });
+  },
+    authIds.alternates
+  );
 });
 
 app.on("file.consent.accept", async ({ activity, send }) => {

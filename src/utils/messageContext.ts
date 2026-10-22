@@ -54,6 +54,7 @@ export async function createMessageContext(
   api?: Client
 ): Promise<MessageContext> {
   const conversationId = `${activity.conversation.id}`;
+  // Prefer Entra object id — stable across personal / group / channel chats.
   const userId = activity.from.aadObjectId || activity.from.id;
   let members: Array<{ name: string; id: string }> = [];
   if (api) {
