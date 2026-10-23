@@ -34,11 +34,11 @@ export const DATABASE_CONFIG: DatabaseConfig = {
   password: process.env.SQL_PASSWORD || process.env.PGPASSWORD,
 };
 
-const XKIRO_OPENAI_BASE_URL = "https://api.xkiro.com/v1";
-const DEFAULT_MODEL = "openai/gpt-oss-120b";
+const DEEPSEEK_OPENAI_BASE_URL = "https://api.deepseek.com";
+const DEFAULT_MODEL = "deepseek-V4-pro";
 
 function resolveBaseUrl(): string {
-  return (process.env.OPENAI_BASE_URL || "").trim() || XKIRO_OPENAI_BASE_URL;
+  return (process.env.OPENAI_BASE_URL || "").trim() || DEEPSEEK_OPENAI_BASE_URL;
 }
 
 function isGroqBaseUrl(baseUrl?: string): boolean {
@@ -53,10 +53,15 @@ function isXkiroBaseUrl(baseUrl?: string): boolean {
   return /api\.xkiro\.com/i.test(baseUrl || "");
 }
 
+function isDeepSeekBaseUrl(baseUrl?: string): boolean {
+  return /api\.deepseek\.com/i.test(baseUrl || "");
+}
+
 function resolveApiKey(): string {
   const baseUrl = resolveBaseUrl();
   const groqMode = isGroqBaseUrl(baseUrl);
   const dashScopeMode = isDashScopeBaseUrl(baseUrl);
+  const deepSeekMode = isDeepSeekBaseUrl(baseUrl);
 
   const candidates = groqMode
     ? [
@@ -70,23 +75,29 @@ function resolveApiKey(): string {
           process.env.OPENAI_API_KEY,
           process.env.XKIRO_API_KEY,
         ]
-      : [
-          process.env.XKIRO_API_KEY,
-          process.env.OPENAI_API_KEY,
-          process.env.DASHSCOPE_API_KEY,
-          process.env.QWEN_API_KEY,
-          process.env.GROQ_API_KEY,
-          process.env.GEMINI_API_KEY,
-          process.env.GOOGLE_API_KEY,
-          process.env.AOAI_API_KEY,
-        ];
+      : deepSeekMode
+        ? [
+            process.env.DEEPSEEK_API_KEY,
+            process.env.OPENAI_API_KEY,
+          ]
+        : [
+            process.env.DEEPSEEK_API_KEY,
+            process.env.XKIRO_API_KEY,
+            process.env.OPENAI_API_KEY,
+            process.env.DASHSCOPE_API_KEY,
+            process.env.QWEN_API_KEY,
+            process.env.GROQ_API_KEY,
+            process.env.GEMINI_API_KEY,
+            process.env.GOOGLE_API_KEY,
+            process.env.AOAI_API_KEY,
+          ];
 
   for (const raw of candidates) {
     const key = (raw || "").trim();
     if (!key) {
       continue;
     }
-    // Groq keys only against Groq; never send gsk_ to DashScope/xKiro
+    // Groq keys only against Groq; never send gsk_ to DeepSeek/DashScope/xKiro
     if (key.startsWith("gsk_")) {
       if (groqMode) {
         return key;
@@ -364,13 +375,18 @@ export function validateEnvironment(logger: ILogger): void {
         "Missing DashScope/Qwen API key. Set DASHSCOPE_API_KEY (or QWEN_API_KEY / OPENAI_API_KEY) with OPENAI_BASE_URL pointing to DashScope compatible-mode."
       );
     }
+    if (isDeepSeekBaseUrl(baseUrl)) {
+      throw new Error(
+        "Missing DeepSeek API key. Set DEEPSEEK_API_KEY (or OPENAI_API_KEY) with OPENAI_BASE_URL=https://api.deepseek.com"
+      );
+    }
     if (isXkiroBaseUrl(baseUrl)) {
       throw new Error(
         "Missing XKIRO_API_KEY (or OPENAI_API_KEY with sk-xt-…). Create a key at https://xkiro.com"
       );
     }
     throw new Error(
-      "Missing API key. Set OPENAI_API_KEY (or DASHSCOPE_API_KEY / XKIRO_API_KEY / GROQ_API_KEY) for your OPENAI_BASE_URL provider."
+      "Missing API key. Set DEEPSEEK_API_KEY / OPENAI_API_KEY (or DASHSCOPE_API_KEY / XKIRO_API_KEY / GROQ_API_KEY) for your OPENAI_BASE_URL provider."
     );
   }
 
