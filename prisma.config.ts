@@ -2,6 +2,9 @@ import "dotenv/config";
 import { definePrismaConfig } from "prisma/config";
 import pgvector from "@prisma/orm-extension-pgvector/control";
 import { defineConfig as ormConfig } from "@prisma/orm-postgres/config";
+import { defineConfig as composer } from "@prisma/composer/config";
+import { nodeBuild } from "@prisma/composer/node/control";
+import { prismaCloud, prismaState } from "@prisma/composer-prisma-cloud/control";
 
 /**
  * Prisma 8 config.
@@ -28,5 +31,9 @@ export default definePrismaConfig({
     db: {
       connection,
     },
+  }),
+  composer: composer({
+    extensions: [prismaCloud({ region: "ap-southeast-1" }), nodeBuild()],
+    state: prismaState(),
   }),
 });
