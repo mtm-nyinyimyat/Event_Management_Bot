@@ -1,62 +1,77 @@
 {
-    "name": "eventmanagementbot",
-    "version": "1.0.0",
-    "description": "Microsoft Teams Event Management bot",
-    "author": "Microsoft",
-    "license": "MIT",
-    "main": "dist/index",
-    "types": "dist/index",
-    "files": [
-        "dist",
-        "README.md"
-    ],
-    "scripts": {
-        "dev:teamsfx": "env-cmd --silent -f .localConfigs npm run dev",
-        "dev:teamsfx:playground": "env-cmd --silent -f .localConfigs.playground npm run dev",
-        "dev:teamsfx:launch-playground": "env-cmd --silent -f env/.env.playground agentsplayground start",
-        "dev": "npx nodemon -w \"./src/**\" -w \".env\" -w \".localConfigs\" -e ts,env --exec \"node --inspect=9239 -r ts-node/register ./src/index.ts\"",
-        "clean": "npx rimraf ./dist",
-        "build": "npx tsup",
-        "start": "node .",
-        "db:update": "env-cmd -f .env prisma db update"
-    },
-    "repository": {
-        "type": "git",
-        "url": "https://github.com"
-    },
-    "engines": {
-        "node": ">=22.18.0"
-    },
-    "dependencies": {
-        "@azure/identity": "^4.12.0",
-        "@azure/msal-node": "^7.0.0",
-        "@microsoft/teams.ai": "2.0.12",
-        "@microsoft/teams.api": "2.0.12",
-        "@microsoft/teams.apps": "2.0.12",
-        "@microsoft/teams.cards": "2.0.12",
-        "@microsoft/teams.common": "2.0.12",
-        "@microsoft/teams.dev": "2.0.12",
-        "@microsoft/teams.graph": "2.0.12",
-        "@microsoft/teams.openai": "2.0.12",
-        "@prisma/orm-extension-pgvector": "^8.0.0-rc.11",
-        "@prisma/orm-postgres": "^8.0.0-rc.11",
-        "pg": "^8.23.0",
-        "temporal-polyfill": "^1.0.5",
-        "undici": "^6.21.0",
-        "xlsx": "^0.18.5"
-    },
-    "devDependencies": {
-        "@types/express": "^5.0.6",
-        "@types/node": "^22.5.4",
-        "@types/pg": "^8.23.1",
-        "dotenv": "^16.4.5",
-        "env-cmd": "latest",
-        "nodemon": "^3.1.4",
-        "prisma": "^8.0.0-rc.20",
-        "rimraf": "^6.0.1",
-        "ts-node": "^10.9.2",
-        "tsup": "^8.4.0",
-        "tsx": "^4.23.13",
-        "typescript": "^5.8.3"
-    }
+  "name": "eventmanagementbot",
+  "version": "1.0.0",
+  "description": "Microsoft Teams Event Management bot",
+  "author": "Microsoft",
+  "license": "MIT",
+  "main": "dist/index",
+  "types": "dist/index",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "dev:teamsfx": "env-cmd --silent -f .localConfigs npm run dev",
+    "dev:teamsfx:playground": "env-cmd --silent -f .localConfigs.playground npm run dev",
+    "dev:teamsfx:launch-playground": "env-cmd --silent -f env/.env.playground agentsplayground start",
+    "dev": "npx nodemon -w \"./src/**\" -w \".env\" -w \".localConfigs\" -e ts,env --exec \"node --inspect=9239 -r ts-node/register ./src/index.ts\"",
+    "clean": "npx rimraf ./dist",
+    "build": "npx tsup",
+    "start": "node .",
+    "db:update": "env-cmd -f .env prisma db update"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "dependencies": {
+    "@azure/identity": "^4.12.0",
+    "@azure/msal-node": "^7.0.0",
+    "@microsoft/teams.ai": "2.0.12",
+    "@microsoft/teams.api": "2.0.12",
+    "@microsoft/teams.apps": "2.0.12",
+    "@microsoft/teams.cards": "2.0.12",
+    "@microsoft/teams.common": "2.0.12",
+    "@microsoft/teams.dev": "2.0.12",
+    "@microsoft/teams.graph": "2.0.12",
+    "@microsoft/teams.openai": "2.0.12",
+    "@prisma/composer": "0.28.0",
+    "@prisma/composer-prisma-cloud": "0.28.0",
+    "@prisma/orm-extension-pgvector": "^8.0.0-rc.11",
+    "@prisma/orm-postgres": "^8.0.0-rc.11",
+    "alchemy": "2.0.0-beta.78",
+    "effect": "4.0.0-rc.115",
+    "pg": "^8.23.0",
+    "temporal-polyfill": "^1.0.5",
+    "undici": "^6.21.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.5.4",
+    "@types/pg": "^8.23.1",
+    "dotenv": "^16.4.5",
+    "env-cmd": "latest",
+    "nodemon": "^3.1.4",
+    "prisma": "^8.0.0-rc.20",
+    "rimraf": "^6.0.1",
+    "ts-node": "^10.9.2",
+    "tsup": "^8.4.0",
+    "tsx": "^4.23.13",
+    "typescript": "^5.8.3"
+  },
+  "overrides": {
+    "@effect/platform-bun": "4.0.0-rc.115",
+    "@effect/platform-node": "4.0.0-rc.115",
+    "@effect/platform-node-shared": "4.0.0-rc.115",
+    "@effect/sql-d1": "4.0.0-rc.115",
+    "@effect/sql-mysql2": "4.0.0-rc.115",
+    "@effect/sql-pg": "4.0.0-rc.115",
+    "@effect/sql-sqlite-do": "4.0.0-rc.115",
+    "@effect/vitest": "4.0.0-rc.115",
+    "effect": "4.0.0-rc.115"
+  }
 }
